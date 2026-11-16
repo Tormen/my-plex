@@ -36145,6 +36145,25 @@ def _scrape_tmdb(series_title: str, metadata: dict[str, str], existing_episodes:
     return new_metadata, all_episodes
 
 
+def _extract_fernsehserien_series_id(html: str) -> str | None:
+    """Extract the primary episodenguide ausstrahlungsform ID from a series page.
+
+    Seasonal shows link `/episodenguide/staffel-N/<id>` (or `/episodenguide/N/<id>`
+    for season >= 1) and may also list `/episodenguide/0/<special_id>` for
+    Specials, so non-zero season links win over `/0/`.  Seasonless shows
+    (e.g. game shows) only have `/episodenguide/0/<id>`.
+    """
+    for pattern in (
+        r'/episodenguide/staffel-\d+/(\d+)',
+        r'/episodenguide/[1-9]\d*/(\d+)',
+        r'/episodenguide/0/(\d+)',
+    ):
+        m = re.search(pattern, html)
+        if m:
+            return m.group(1)
+    return None
+
+
 def _discover_fernsehserien_slug(series_title: str, year: int | None = None
                                  ) -> tuple[str, str | None] | tuple[None, None]:
     """Search fernsehserien.de for the series's slug and ID.
@@ -36165,8 +36184,7 @@ def _discover_fernsehserien_slug(series_title: str, year: int | None = None
             resp = urllib.request.urlopen(req, timeout=10)
             html = resp.read().decode("utf-8")
             if '/episodenguide' in html or '/sendetermine' in html:
-                m = re.search(r'/episodenguide/staffel-\d+/(\d+)', html)
-                series_id = m.group(1) if m else None
+                series_id = _extract_fernsehserien_series_id(html)
                 has_epguide = '/episodenguide' in html
                 return (slug_candidate, series_id, has_epguide)
         except (OSError, ValueError, http.client.HTTPException):
@@ -36219,8 +36237,7 @@ def _discover_fernsehserien_slug(series_title: str, year: int | None = None
             try:
                 html2 = urllib.request.urlopen(req2, timeout=10).read().decode("utf-8")
                 if '/episodenguide' in html2 or '/sendetermine' in html2:
-                    m = re.search(r'/episodenguide/staffel-\d+/(\d+)', html2)
-                    series_id = m.group(1) if m else None
+                    series_id = _extract_fernsehserien_series_id(html2)
                     return slug, series_id
             except (OSError, ValueError, http.client.HTTPException):
                 pass
@@ -36235,7 +36252,7 @@ def _scrape_fernsehserien_de(series_title: str, metadata: dict[str, str], existi
     """Scrape fernsehserien.de for episode data.
 
     Uses two strategies:
-    1. episodenguide/staffel-N pages (structured, per-season, needs series_id)
+    1. episodenguide/staffel-N (or /0/ for seasonless shows) pages (structured, needs series_id)
     2. sendetermine pages (broadcast dates with episode links, works without series_id)
 
     Returns: (metadata_updates, episodes_list) or None on failure
@@ -36245,13 +36262,24 @@ def _scrape_fernsehserien_de(series_title: str, metadata: dict[str, str], existi
     slug = metadata.get('slug')
     series_id = metadata.get('series_id')
 
-    # Discover slug if not known
+    # Discover slug (and series_id) if not known, or backfill series_id for
+    # pre-existing TSVs that only recorded slug.
     if not slug:
         if VRB: print(f"  Discovering fernsehserien.de slug for '{series_title}'...")
         slug, series_id = _discover_fernsehserien_slug(series_title, year=year)
         if not slug:
             if VRB: print(f"  WARNING: Could not find '{series_title}' on fernsehserien.de", file=sys.stderr)
             return None
+    elif not series_id:
+        try:
+            req = urllib.request.Request(
+                f"https://www.fernsehserien.de/{slug}",
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            html = urllib.request.urlopen(req, timeout=10).read().decode("utf-8")
+            series_id = _extract_fernsehserien_series_id(html)
+        except (OSError, ValueError, http.client.HTTPException):
+            pass
 
     new_metadata: dict[str, str] = {'slug': slug}
     if series_id:
@@ -36269,7 +36297,7 @@ def _scrape_fernsehserien_de(series_title: str, metadata: dict[str, str], existi
         # Strategy 1: episodenguide/staffel-N (structured data)
         # Split HTML by itemprop="episode" sections — each section contains all data
         # for one episode, avoiding cross-episode regex mismatches.
-        # Start from season 1 (or last known - 1 for updates) and keep going until
+        # Start from season 0 (or last known - 1 for updates) and keep going until
         # two consecutive empty pages (some shows skip season numbers).
         max_existing = max((ep['season'] for ep in existing_episodes), default=0)
         start_season = max(0, max_existing - 1) if existing_episodes else 0
@@ -36282,7 +36310,8 @@ def _scrape_fernsehserien_de(series_title: str, metadata: dict[str, str], existi
             page = 1
             while True:
                 if page == 1:
-                    url = f"https://www.fernsehserien.de/{slug}/episodenguide/staffel-{s}/{series_id}"
+                    season_seg = '0' if s == 0 else f'staffel-{s}'
+                    url = f"https://www.fernsehserien.de/{slug}/episodenguide/{season_seg}/{series_id}"
                 else:
                     url = f"https://www.fernsehserien.de/{slug}/episodenguide/{s}/{series_id}/{page}"
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -36306,9 +36335,16 @@ def _scrape_fernsehserien_de(series_title: str, metadata: dict[str, str], existi
 
                 for section in ep_sections:
                     m_num = re.search(r'itemprop="episodeNumber" content="(\d+)"', section)
-                    if not m_num:
-                        continue
-                    ep_num = int(m_num.group(1))
+                    if m_num:
+                        ep_num = int(m_num.group(1))
+                    else:
+                        # fernsehserien.de omits itemprop="episodeNumber" when the
+                        # episode title is literally "Folge N"; the /folgen/ URL
+                        # still starts with the episode number.
+                        m_href = re.search(rf'href="/{re.escape(slug)}/folgen/(?:\d+x)?(\d+)-', section)
+                        if not m_href:
+                            continue
+                        ep_num = int(m_href.group(1))
                     key = (s, ep_num)
 
                     # German title (itemprop="name")
@@ -36351,7 +36387,7 @@ def _scrape_fernsehserien_de(series_title: str, metadata: dict[str, str], existi
                         'date_local': date_local, 'sender_local': sender_local,
                         'date_original': date_original, 'sender_original': sender_original,
                     }
-                    if key not in existing_by_key or date < existing_by_key[key].get('date', 'Z'):
+                    if key not in existing_by_key or (date and date < (existing_by_key[key].get('date') or 'Z')):
                         existing_by_key[key] = ep_data
                         new_count += 1
                     else:
@@ -36398,7 +36434,7 @@ def _scrape_fernsehserien_de(series_title: str, metadata: dict[str, str], existi
                     new_metadata['series_title'] = m_page_title.group(1).strip()
 
             pairs = re.findall(
-                r'role=rowgroup\s+href="/' + re.escape(slug) + r'/folgen/(\d+)-([^"]*)".*?datetime="(\d{4}-\d{2}-\d{2})T',
+                r'role="?rowgroup"?[^>]*\bhref="/' + re.escape(slug) + r'/folgen/(\d+)-([^"]*)".*?datetime="(\d{4}-\d{2}-\d{2})T',
                 html, re.DOTALL
             )
 
@@ -42081,6 +42117,118 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
                 sorted_count += 1
                 continue
 
+            # 1f (v2.26). Explicit prose forms — `Season N Episode M`.
+            prose_match = _re.search(
+                r'season[\s_\-]*(\d+)[\s_\-]+episode[\s_\-]*(\d+)',
+                fn, _re.IGNORECASE
+            )
+            if prose_match:
+                season = int(prose_match.group(1))
+                ep_num = int(prose_match.group(2))
+                target_dir = os.path.join(series_dir, f"s{season:02d}")
+                new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
+                if dry_run:
+                    dry_run_lines.append((season, ep_num, f"    [dry-run] [prose] S{season:02d}E{ep_num:02d}: {fn}"))
+                else:
+                    if not _sort_move(fp, target_dir, new_name):
+                        print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
+                        failed_count += 1
+                        continue
+                    print(f"    [prose] {fn} -> s{season:02d}/{new_name}")
+                sorted_count += 1
+                continue
+
+            # 2. Parse explicit air date from filename BEFORE heuristic number
+            #    patterns (1c/1d/1e/specials): a dated TVOON file like
+            #    `Show__Teil_2_2___Folge_76_26.08.08_22-15_zdf_60_TVOON_DE.mp4`
+            #    or `Show__Das_Spenden-Special_26.09.05_20-15_zdf_164_TVOON_DE.mp4`
+            #    must resolve via its TSV broadcast date rather than letting `_2_`
+            #    trigger abs-idx=2 or `Special` invent a sequential S00E## number.
+            #    And a dated file whose date is absent from TSV must skip rather
+            #    than fall through to numeric heuristics (like `_150_` duration).
+            file_date = extract_episode_date(fn)
+            if file_date is not None:
+                iso_date = file_date.strftime('%Y-%m-%d')
+
+                # 2a. Look up date in TSV (also try previous day for rebroadcasts)
+                result = date_lookup.get(iso_date)
+                lookup_info = iso_date
+
+                if result is None:
+                    prev_date = file_date - timedelta(days=1)
+                    prev_iso = prev_date.strftime('%Y-%m-%d')
+                    result = date_lookup.get(prev_iso)
+                    if result:
+                        lookup_info = f"{prev_iso} (rebroadcast)"
+
+                if result:
+                    season, ep_num, _title = result
+                    target_dir = os.path.join(series_dir, f"s{season:02d}")
+                    new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
+                    _target_path = os.path.join(target_dir, new_name)
+
+                    if dry_run:
+                        dry_run_lines.append((season, ep_num, f"    [dry-run] [tsv] {lookup_info} -> S{season:02d}E{ep_num:02d}: {fn}"))
+                    else:
+                        if not _sort_move(fp, target_dir, new_name):
+                            print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
+                            failed_count += 1
+                            continue
+                        print(f"    [tsv] {lookup_info} -> s{season:02d}/{new_name}")
+                    sorted_count += 1
+                    continue
+
+                # Dated special not listed in TSV (e.g. standalone spin-off special)
+                if is_special_episode(fn, specials_pattern):
+                    if has_specials_script:
+                        # Delegate to sort_specials.sh
+                        if dry_run:
+                            dry_run_lines.append((0, 0, f"    [dry-run] {fn} -> sort_specials.sh"))
+                        else:
+                            try:
+                                subprocess.run(['bash', specials_script, fp], check=True, cwd=series_dir)
+                                print(f"    {fn} -> sort_specials.sh")
+                            except subprocess.CalledProcessError as e:
+                                print(f"    ERROR: sort_specials.sh failed for {fn}: {e}", file=sys.stderr)
+                                failed_count += 1
+                                continue
+                    else:
+                        # Default: move to specials/ as S00Exx
+                        target_dir = os.path.join(series_dir, 'specials')
+                        ep_num = _take_next_ep(target_dir, 0)
+                        new_name = PLEX_Media._build_sxex_filename(0, ep_num, fn)
+                        _target_path = os.path.join(target_dir, new_name)
+                        if dry_run:
+                            dry_run_lines.append((0, ep_num, f"    [dry-run] {fn} -> specials/{new_name}"))
+                        else:
+                            if not _sort_move(fp, target_dir, new_name):
+                                print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
+                                failed_count += 1
+                                continue
+                            print(f"    {fn} -> specials/{new_name}")
+                    sorted_count += 1
+                    continue
+
+                # No TSV match — SKIP, do not silently invent SxxEyy.
+                # The destructive fallback that used to assign
+                # `latest_season + next_available_episode` was removed
+                # because it baked arbitrary episode numbers into
+                # filenames whenever the TSV was incomplete or wrong
+                # for the series (see Heimatbilder/Die_Millionenshow
+                # incident).  An SxxEyy assignment must come from a
+                # certain source: TSV date match, filename pattern,
+                # or future explicit --fuzzy override.
+                _hint = f"date {iso_date} not in TSV"
+                if all_episodes:
+                    _hint += f" ({len(all_episodes)} eps known)"
+                else:
+                    _hint += " (no scraped episode list)"
+                print(f"    [skip] {fn}")
+                print(f"           {_hint} — fix series match (--mismatched) or refresh TSV, then re-run with --redo")
+                skipped_count += 1
+                continue
+
+            # 3. No explicit air date — try non-dated numbering heuristics
             # 1c. Check for absolute numbering (e.g., "101" → S01E01, "1203" → S12E03)
             #     Standalone 3+ digit number, bounded by non-digits (or separators like - _ .)
             abs_match = _re.search(r'(?:^|[^0-9])(\d{3,4})(?:[^0-9]|$)', fn)
@@ -42203,161 +42351,58 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
                         sorted_count += 1
                         continue
 
-            # 1f (v2.26). Explicit prose forms — `Season N Episode M`,
-            # or `Special` / `Pilot` keyword (→ s00/).
-            prose_match = _re.search(
-                r'season[\s_\-]*(\d+)[\s_\-]+episode[\s_\-]*(\d+)',
-                fn, _re.IGNORECASE
-            )
-            if prose_match:
-                season = int(prose_match.group(1))
-                ep_num = int(prose_match.group(2))
-                target_dir = os.path.join(series_dir, f"s{season:02d}")
-                new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
-                if dry_run:
-                    dry_run_lines.append((season, ep_num, f"    [dry-run] [prose] S{season:02d}E{ep_num:02d}: {fn}"))
-                else:
-                    if not _sort_move(fp, target_dir, new_name):
-                        print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
-                        failed_count += 1
-                        continue
-                    print(f"    [prose] {fn} -> s{season:02d}/{new_name}")
-                sorted_count += 1
-                continue
-            # 2. Parse date from filename
-            file_date = extract_episode_date(fn)
-            if file_date is None:
-                # 2b. Try year-based matching: extract year from (YYYY) or [YYYY] and match by title in TSV
-                year_match = _re.search(r'[\(\[]((?:19|20)\d{2})[\)\]]', fn)
-                if year_match and all_episodes:
-                    file_year = year_match.group(1)
-                    # Find TSV entries with matching year
-                    year_candidates = [ep for ep in all_episodes if ep['date'].startswith(file_year)]
-                    matched_ep = None
-                    if len(year_candidates) == 1:
-                        matched_ep = year_candidates[0]
-                    elif len(year_candidates) > 1:
-                        # Multiple entries in same year — match by title
-                        fn_norm = _normalize_alpha(fn)
+            # 2b. Try year-based matching: extract year from (YYYY) or [YYYY] and match by title in TSV
+            year_match = _re.search(r'[\(\[]((?:19|20)\d{2})[\)\]]', fn)
+            if year_match and all_episodes:
+                file_year = year_match.group(1)
+                # Find TSV entries with matching year
+                year_candidates = [ep for ep in all_episodes if ep['date'].startswith(file_year)]
+                matched_ep = None
+                if len(year_candidates) == 1:
+                    matched_ep = year_candidates[0]
+                elif len(year_candidates) > 1:
+                    # Multiple entries in same year — match by title
+                    fn_norm = _normalize_alpha(fn)
+                    for ep in year_candidates:
+                        if _normalize_alpha(ep.get('title', '')) in fn_norm or fn_norm in _normalize_alpha(ep.get('title', '') or ''):
+                            matched_ep = ep
+                            break
+                    if not matched_ep:
+                        # Try: normalized title is substring of normalized filename
                         for ep in year_candidates:
-                            if _normalize_alpha(ep.get('title', '')) in fn_norm or fn_norm in _normalize_alpha(ep.get('title', '') or ''):
+                            ep_title_norm = _normalize_alpha(ep.get('title', ''))
+                            if ep_title_norm and ep_title_norm in fn_norm:
                                 matched_ep = ep
                                 break
-                        if not matched_ep:
-                            # Try: normalized title is substring of normalized filename
-                            for ep in year_candidates:
-                                ep_title_norm = _normalize_alpha(ep.get('title', ''))
-                                if ep_title_norm and ep_title_norm in fn_norm:
-                                    matched_ep = ep
-                                    break
-                    if matched_ep:
-                        season = matched_ep['season']
-                        ep_num = matched_ep['episode']
-                        target_dir = os.path.join(series_dir, f"s{season:02d}")
-                        new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
-                        _target_path = os.path.join(target_dir, new_name)
-                        if dry_run:
-                            dry_run_lines.append((season, ep_num, f"    [dry-run] [year] {file_year} -> S{season:02d}E{ep_num:02d}: {fn}"))
-                        else:
-                            if not _sort_move(fp, target_dir, new_name):
-                                print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
-                                failed_count += 1
-                                continue
-                            print(f"    [year] {file_year} -> s{season:02d}/{new_name}")
-                        sorted_count += 1
-                        continue
-                # Not a real warning — many legitimate naming schemes
-                # don't carry dates (e.g. `Seinfeld-101-Pilot.avi`,
-                # `Es_war_einmal_das_Leben_-_25_-_…`).  Counts as a
-                # failed sort but only chatters under -D / -V; otherwise
-                # silent to keep the --sort-new output clean.
-                if VRB or DBG:
-                    msg = f"    (no date in: {fn})"
-                    if dry_run:
-                        dry_run_lines.append((9999, 0, msg))
-                    else:
-                        print(msg)
-                failed_count += 1
-                continue
-
-            iso_date = file_date.strftime('%Y-%m-%d')
-
-            # Check for special episodes
-            if is_special_episode(fn, specials_pattern):
-                if has_specials_script:
-                    # Delegate to sort_specials.sh
-                    if dry_run:
-                        dry_run_lines.append((0, 0, f"    [dry-run] {fn} -> sort_specials.sh"))
-                    else:
-                        try:
-                            subprocess.run(['bash', specials_script, fp], check=True, cwd=series_dir)
-                            print(f"    {fn} -> sort_specials.sh")
-                        except subprocess.CalledProcessError as e:
-                            print(f"    ERROR: sort_specials.sh failed for {fn}: {e}", file=sys.stderr)
-                            failed_count += 1
-                            continue
-                else:
-                    # Default: move to specials/ as S00Exx
-                    target_dir = os.path.join(series_dir, 'specials')
-                    ep_num = _take_next_ep(target_dir, 0)
-                    new_name = PLEX_Media._build_sxex_filename(0, ep_num, fn)
+                if matched_ep:
+                    season = matched_ep['season']
+                    ep_num = matched_ep['episode']
+                    target_dir = os.path.join(series_dir, f"s{season:02d}")
+                    new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
                     _target_path = os.path.join(target_dir, new_name)
                     if dry_run:
-                        dry_run_lines.append((0, ep_num, f"    [dry-run] {fn} -> specials/{new_name}"))
+                        dry_run_lines.append((season, ep_num, f"    [dry-run] [year] {file_year} -> S{season:02d}E{ep_num:02d}: {fn}"))
                     else:
                         if not _sort_move(fp, target_dir, new_name):
                             print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                             failed_count += 1
                             continue
-                        print(f"    {fn} -> specials/{new_name}")
-                sorted_count += 1
-                continue
-
-            # 3. Look up date in TSV (also try previous day for rebroadcasts)
-            result = date_lookup.get(iso_date)
-            lookup_info = iso_date
-
-            if result is None:
-                prev_date = file_date - timedelta(days=1)
-                prev_iso = prev_date.strftime('%Y-%m-%d')
-                result = date_lookup.get(prev_iso)
-                if result:
-                    lookup_info = f"{prev_iso} (rebroadcast)"
-
-            if result:
-                season, ep_num, _title = result
-                target_dir = os.path.join(series_dir, f"s{season:02d}")
-                new_name = PLEX_Media._build_sxex_filename(season, ep_num, fn)
-                _target_path = os.path.join(target_dir, new_name)
-
+                        print(f"    [year] {file_year} -> s{season:02d}/{new_name}")
+                    sorted_count += 1
+                    continue
+            # Not a real warning — many legitimate naming schemes
+            # don't carry dates (e.g. `Seinfeld-101-Pilot.avi`,
+            # `Es_war_einmal_das_Leben_-_25_-_…`).  Counts as a
+            # failed sort but only chatters under -D / -V; otherwise
+            # silent to keep the --sort-new output clean.
+            if VRB or DBG:
+                msg = f"    (no date in: {fn})"
                 if dry_run:
-                    dry_run_lines.append((season, ep_num, f"    [dry-run] [tsv] {lookup_info} -> S{season:02d}E{ep_num:02d}: {fn}"))
+                    dry_run_lines.append((9999, 0, msg))
                 else:
-                    if not _sort_move(fp, target_dir, new_name):
-                        print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
-                        failed_count += 1
-                        continue
-                    print(f"    [tsv] {lookup_info} -> s{season:02d}/{new_name}")
-                sorted_count += 1
-            else:
-                # No TSV match — SKIP, do not silently invent SxxEyy.
-                # The destructive fallback that used to assign
-                # `latest_season + next_available_episode` was removed
-                # because it baked arbitrary episode numbers into
-                # filenames whenever the TSV was incomplete or wrong
-                # for the series (see Heimatbilder/Die_Millionenshow
-                # incident).  An SxxEyy assignment must come from a
-                # certain source: TSV date match, filename pattern,
-                # or future explicit --fuzzy override.
-                _hint = f"date {iso_date} not in TSV"
-                if all_episodes:
-                    _hint += f" ({len(all_episodes)} eps known)"
-                else:
-                    _hint += " (no scraped episode list)"
-                print(f"    [skip] {fn}")
-                print(f"           {_hint} — fix series match (--mismatched) or refresh TSV, then re-run with --redo")
-                skipped_count += 1
-                continue
+                    print(msg)
+            failed_count += 1
+            continue
 
         # Print collected dry-run lines sorted by S##E##
         if dry_run and dry_run_lines:

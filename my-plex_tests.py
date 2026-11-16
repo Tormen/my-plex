@@ -38,6 +38,8 @@ from my_plex import (
     read_episodes_tsv, write_episodes_tsv, is_episodes_tsv_stale,
     extract_episode_date, is_special_episode, _BUILTIN_EXTRACTORS,
     scrape_episodes, cmd_missing, EMPTY_LIBRARY_STATS, CONFIG_DEFAULTS,
+    _extract_fernsehserien_series_id, _discover_fernsehserien_slug,
+    _scrape_fernsehserien_de, cmd_sort_new,
     write_episodes_err, read_episodes_err, clear_episodes_err,
     get_episodes_err_path, validate_disk_plex_map, compute_markers_dpm,
     read_markers_from_disk, resolve_disk_map_variables, strip_our_markers,
@@ -57,7 +59,7 @@ from my_plex import (
 )
 
 if TYPE_CHECKING:
-    from my_plex import CollectionRecord, MediaRecord
+    from my_plex import CollectionRecord, EpisodeTsvRow, MediaRecord
 
 # The tool's files.  The tool overrides all three when it loads the suite
 # (_load_test_mod): only it knows them -- on a deployed copy the launcher is
@@ -6981,6 +6983,28 @@ print(json.dumps({{'episodes': len(episodes), 'max_season': max_s}}))
         self.assertFalse(same,
             f"Ted Lasso and Der Tatortreiniger returned identical data: {show1['episodes']} ep / {show1['max_season']} seasons — likely a bug")
 
+    def test_fernsehserien_seasonless_quiz_champion(self):
+        """fernsehserien.de: seasonless game show (Der Quiz-Champion) must
+        discover series_id from /episodenguide/0/<id> and scrape episodes
+        whose title is 'Folge N' (where itemprop=episodeNumber is omitted)."""
+        try:
+            slug, series_id = _discover_fernsehserien_slug('Der Quiz-Champion')
+        except Exception as e:
+            self.skipTest(f"fernsehserien.de discovery failed: {e}")
+        if not slug:
+            self.skipTest("fernsehserien.de unreachable or slug not found")
+        self.assertEqual(slug, 'der-quiz-champion')
+        self.assertEqual(series_id, '23209')
+        res = _scrape_fernsehserien_de('Der Quiz-Champion', {}, [])
+        if res is None:
+            self.skipTest("fernsehserien.de scrape returned None")
+        meta, episodes = res
+        self.assertEqual(meta.get('series_id'), '23209')
+        self.assertGreaterEqual(len(episodes), 80, f"expected >=80 episodes, got {len(episodes)}")
+        dates_by_ep = {(ep['season'], ep['episode']): ep['date'] for ep in episodes}
+        self.assertEqual(dates_by_ep.get((0, 78)), '2026-09-23')
+        self.assertEqual(dates_by_ep.get((0, 79)), '2026-09-26')
+
     def test_scraper_summary_lines_all_sources(self):
         """All three scrapers must print a summary line with episode/season count."""
         src = self._read_script()
@@ -6991,6 +7015,188 @@ print(json.dumps({{'episodes': len(episodes), 'max_season': max_s}}))
     def _read_script(self):
         with open(TOOL_SOURCE, 'r') as f:
             return f.read()
+
+
+class TestFernsehserienSeasonless(unittest.TestCase):
+    """Seasonless fernsehserien.de shows (/episodenguide/0/<id>) and 'Folge N'
+    rows that omit itemprop=episodeNumber."""
+
+    def test_extract_series_id_prefers_seasonal_over_zero(self):
+        """Seasonal shows list /0/<special_id> before /staffel-1/<id>;
+        the non-zero season ID must win."""
+        html = (
+            '<a href="/tagesschau/episodenguide/0/99999">Specials</a>'
+            '<a href="/tagesschau/episodenguide/staffel-1/16508">Staffel 1</a>'
+        )
+        self.assertEqual(_extract_fernsehserien_series_id(html), '16508')
+
+    def test_extract_series_id_falls_back_to_zero_for_seasonless(self):
+        """Seasonless shows only have /episodenguide/0/<id> links."""
+        html = (
+            '<a href="/tagesschau/episodenguide/0/23209">bisher 81 Folgen</a>'
+            '<a href="/tagesschau/episodenguide/0/61254">Specials</a>'
+        )
+        self.assertEqual(_extract_fernsehserien_series_id(html), '23209')
+
+    def test_scrape_backfills_series_id_and_extracts_folge_from_href(self):
+        """An existing TSV with slug only (no series_id) must discover
+        series_id and extract episodes lacking itemprop=episodeNumber via href."""
+        from unittest import mock
+        import urllib.error
+
+        series_html = (
+            '<html><a href="/test-show/episodenguide/0/23209">bisher 79 Folgen</a></html>'
+        )
+        page1_html = (
+            '<html><title>Test Show – Episodenguide</title>'
+            '<div itemprop="episode" itemscope itemtype="http://schema.org/TVEpisode">'
+            '<a itemprop="url" href="/test-show/folgen/77-spenden-special-9001">'
+            '<span itemprop="name">Spenden-Special</span></a>'
+            '<div itemprop="episodeNumber" content="77">Folge 77</div>'
+            '<ea-angabe data-sort="0-2026-09-05"><ea-angabe-titel>P</ea-angabe-titel>'
+            '<ea-angabe-datum>05.09.2026</ea-angabe-datum><ea-angabe-sender>ZDF</ea-angabe-sender></ea-angabe>'
+            '</div>'
+            '<div itemprop="episode" itemscope itemtype="http://schema.org/TVEpisode">'
+            '<a itemprop="url" href="/test-show/folgen/78-folge-78-9002">'
+            '<span itemprop="name">Folge 78</span></a>'
+            '<div class="episoden-zeile-1000"><div>90 Min.</div></div>'
+            '<ea-angabe data-sort="0-2026-09-23"><ea-angabe-titel>P</ea-angabe-titel>'
+            '<ea-angabe-datum>23.09.2026</ea-angabe-datum><ea-angabe-sender>ZDF</ea-angabe-sender></ea-angabe>'
+            '</div>'
+            '<div itemprop="episode" itemscope itemtype="http://schema.org/TVEpisode">'
+            '<a itemprop="url" href="/test-show/folgen/79-folge-79-9003">'
+            '<span itemprop="name">Folge 79</span></a>'
+            '<div class="episoden-zeile-1000"><div>150 Min.</div></div>'
+            '<ea-angabe data-sort="0-2026-09-26"><ea-angabe-titel>P</ea-angabe-titel>'
+            '<ea-angabe-datum>26.09.2026</ea-angabe-datum><ea-angabe-sender>ZDF</ea-angabe-sender></ea-angabe>'
+            '</div></html>'
+        )
+
+        class _Resp:
+            def __init__(self, body: str) -> None:
+                self._body = body.encode('utf-8')
+            def read(self) -> bytes:
+                return self._body
+
+        def fake_urlopen(req: Any, timeout: int = 10) -> _Resp:
+            url: str = getattr(req, 'full_url', str(req))
+            if url == 'https://www.fernsehserien.de/test-show':
+                return _Resp(series_html)
+            if url == 'https://www.fernsehserien.de/test-show/episodenguide/0/23209':
+                return _Resp(page1_html)
+            raise urllib.error.URLError('Not Found')
+
+        existing: list[EpisodeTsvRow] = [
+            {'season': 0, 'episode': 75, 'date': '2026-04-18', 'title': 'Folge 75'}
+        ]
+        with mock.patch('urllib.request.urlopen', side_effect=fake_urlopen), \
+             mock.patch('time.sleep'), \
+             contextlib.redirect_stdout(io.StringIO()):
+            res = _scrape_fernsehserien_de('Test Show', {'slug': 'test-show'}, existing)
+
+        assert res is not None
+        meta, eps = res
+        self.assertEqual(meta.get('series_id'), '23209')
+        by_key = {(e['season'], e['episode']): e for e in eps}
+        self.assertEqual(by_key[(0, 77)]['date'], '2026-09-05')
+        self.assertEqual(by_key[(0, 78)]['date'], '2026-09-23')
+        self.assertEqual(by_key[(0, 79)]['date'], '2026-09-26')
+
+
+class TestSortNewDatePrecedence(unittest.TestCase):
+    """cmd_sort_new must resolve dated TVOON files against episodes.tsv before
+    applying non-dated numeric heuristics (1c/1d/1e) or standalone specials."""
+
+    def setUp(self):
+        self.mp = _main_module()
+        media = self.mp.PLEX_Media
+        lib = self.mp.PLEX_Library
+        self._saved = (
+            media.OBJ_BY_ID, media.OBJ_BY_LIBRARY, media.OBJ_BY_SERIES_EPISODES,
+            lib.OBJ_DICT, lib.OBJ_DICT_TYPE, self.mp.PLEX_DB_REMOTE_HOST,
+            self.mp.SORT_NEW_SCAN_LOCATIONS, self.mp._SORT_NEW_LOCATIONS_COMPILED,
+        )
+
+    def tearDown(self):
+        media = self.mp.PLEX_Media
+        lib = self.mp.PLEX_Library
+        (
+            media.OBJ_BY_ID, media.OBJ_BY_LIBRARY, media.OBJ_BY_SERIES_EPISODES,
+            lib.OBJ_DICT, lib.OBJ_DICT_TYPE, self.mp.PLEX_DB_REMOTE_HOST,
+            self.mp.SORT_NEW_SCAN_LOCATIONS, self.mp._SORT_NEW_LOCATIONS_COMPILED,
+        ) = self._saved
+
+    def test_dated_files_use_tsv_before_abs_idx_and_special(self):
+        from unittest import mock
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        series_dir = os.path.join(root, 'tagesschau')
+        s0x_dir = os.path.join(series_dir, 's0x')
+        os.makedirs(s0x_dir)
+
+        # Create 80 TSV entries so len(all_episodes) >= 25 (making _2_ and _25_ eligible for 1e)
+        tsv_eps: list[dict[str, Any]] = [
+            {'season': 0, 'episode': n, 'date': f'2020-01-{n:02d}' if n <= 28 else f'2020-02-{n - 28:02d}', 'title': f'Folge {n}'}
+            for n in range(1, 56)
+        ]
+        tsv_eps.extend([
+            {'season': 0, 'episode': 76, 'date': '2026-08-08', 'title': 'Folge 76'},
+            {'season': 0, 'episode': 77, 'date': '2026-09-05', 'title': 'Das Spenden-Special (6)'},
+            {'season': 0, 'episode': 79, 'date': '2026-09-26', 'title': 'Folge 79'},
+        ])
+        write_episodes_tsv(
+            os.path.join(series_dir, 'episodes.tsv'),
+            {'source': 'fernsehserien.de', 'slug': 'test-show', 'series_id': '23209'},
+            tsv_eps,
+        )
+
+        files = [
+            # Dated + embedded _2_ in Teil_2_2: must resolve via TSV 2026-08-08 -> S00E76, NOT abs-idx=2
+            'Show__Teil_2_2___Folge_76_26.08.08_22-15_zdf_60_TVOON_DE.mpg.HQ.mp4',
+            # Dated + 'Special' keyword + date IN TSV: must resolve via TSV 2026-09-05 -> S00E77
+            'Show__Das_Spenden-Special_26.09.05_20-15_zdf_164_TVOON_DE.HQ.mp4',
+            # Dated regular episode: must resolve via TSV 2026-09-26 -> S00E79
+            'Show__Folge_79_26.09.26_20-15_zdf_150_TVOON_DE.HQ.mp4',
+            # Dated file NOT in TSV with _2_ and _120_: must [skip], NOT abs-idx=2 or [absolute] S01E20
+            'Show__Teil_2_2_26.11.01_20-15_zdf_120_TVOON_DE.mp4',
+            # Dated special NOT in TSV: must route to specials/
+            'Show_XXL_25.01.01_20-15_ard.avi',
+            # Non-dated file with embedded index 25: must still match [abs-idx=25]
+            'Show_-_25_-_Title.avi',
+        ]
+        for fn in files:
+            open(os.path.join(s0x_dir, fn), 'w').close()
+
+        media = self.mp.PLEX_Media
+        lib = self.mp.PLEX_Library
+        series_rec: dict[str, Any] = {'type': 'Series', 'type_str': 'Series', 'id': 3295, 'title': 'Tagesschau', 'library': 'lib6', 'file': series_dir}
+        media.OBJ_BY_ID = {'Series:3295': series_rec}
+        media.OBJ_BY_LIBRARY = {'lib6': {'Series': ['Series:3295']}}
+        media.OBJ_BY_SERIES_EPISODES = {'Series:3295': {}}
+        lib.OBJ_DICT = {'lib6': mock.MagicMock(locations=[root])}
+        lib.OBJ_DICT_TYPE = {'lib6': 'Series'}
+        self.mp.PLEX_DB_REMOTE_HOST = ''
+        self.mp.SORT_NEW_SCAN_LOCATIONS = ['.', 's0x']
+        self.mp._SORT_NEW_LOCATIONS_COMPILED = None
+
+        buf = io.StringIO()
+        args = mock.MagicMock(redo=False, yes=False, force=False)
+        with mock.patch.object(self.mp, 'is_episodes_tsv_stale', return_value=False), \
+             mock.patch.object(self.mp, '_sort_new_consolidate_season_wrappers', return_value=set()), \
+             mock.patch.object(self.mp, '_sort_new_movies'), \
+             mock.patch.object(self.mp, '_write_resolve_log'), \
+             contextlib.redirect_stdout(buf):
+            cmd_sort_new(args, dry_run=True, target='Series:3295')
+
+        out = buf.getvalue()
+        self.assertIn('[tsv] 2026-08-08 -> S00E76: Show__Teil_2_2___Folge_76_26.08.08_22-15_zdf_60_TVOON_DE.mpg.HQ.mp4', out)
+        self.assertNotIn('[abs-idx=2]', out)
+        self.assertIn('[tsv] 2026-09-05 -> S00E77: Show__Das_Spenden-Special_26.09.05_20-15_zdf_164_TVOON_DE.HQ.mp4', out)
+        self.assertIn('[tsv] 2026-09-26 -> S00E79: Show__Folge_79_26.09.26_20-15_zdf_150_TVOON_DE.HQ.mp4', out)
+        self.assertIn('[skip] Show__Teil_2_2_26.11.01_20-15_zdf_120_TVOON_DE.mp4', out)
+        self.assertNotIn('[absolute]', out)
+        self.assertIn('Show_XXL_25.01.01_20-15_ard.avi -> specials/', out)
+        self.assertIn('[abs-idx=25] S00E25: Show_-_25_-_Title.avi', out)
 
 
 class TestMismatched(unittest.TestCase):
@@ -19443,7 +19649,7 @@ _UNITTEST_SCOPES = {
                    TestEpisodeSourceSelection, TestExternalIdsInCache,
                    TestEpisodeSourceConfig, TestSourceE2E,
                    TestEpisodesErr, TestEpisodesErrClassification,
-                   TestForceTsv, TestTsvScrapersE2E,
+                   TestForceTsv, TestTsvScrapersE2E, TestFernsehserienSeasonless,
                    TestEpisodeNumberingIssues, TestObjByShowScraped,
                    TestS0XE0XPadding, TestMultiEpisodeSiblings,
                    TestAbsEpIdx, TestInfoScrapedData],
@@ -19451,7 +19657,7 @@ _UNITTEST_SCOPES = {
     'rename':     [TestRename, TestRenameShared],
     'commands':   [TestNearMissFlag, TestStrayWordRefused, TestRemoveCommand, TestDeleteRequiresRemove, TestScan,
                    TestTrashNotRemove,
-                   TestSortNew, TestSortNewSeasonWrapper, TestSortNewScanLocations, TestUnmatched, TestUnsorted,
+                   TestSortNew, TestSortNewDatePrecedence, TestSortNewSeasonWrapper, TestSortNewScanLocations, TestUnmatched, TestUnsorted,
                    TestUncollectedResolveOutcome],
     'tools':      [TestSshOptions, TestRunToolLocally, TestRunToolOnPLEXServer, TestNoSshWithoutAHost],
     'quiet':      [TestQuiet],
