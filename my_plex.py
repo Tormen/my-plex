@@ -27502,9 +27502,14 @@ class PLEX_Media(PLEX_OBJ_TYPE_ABC):
                 return True
         # Fast path: cache filepath search — no API needed
         normalized = os.path.normpath(obj)
-        for filepath in get_alternative_paths(normalized):
+        for filepath in get_alternative_paths(normalized, including_path=True):
             if filepath in PLEX_Media.OBJ_BY_FILEPATH:
                 return True
+        # Any explicit filesystem path (/...) is handled as a media target; if
+        # not yet in Plex DB / cache, show_item_info reports guiding feedback
+        # instead of failing with ERROR 00196.
+        if obj.startswith('/'):
+            return True
         return False
 
     @staticmethod
@@ -44710,7 +44715,8 @@ def resolve_cache_items(identifier: str) -> list[tuple[str, Any]]:
 
     # Strategy 4: Try as filepath (with path translation)
     if not found_items and (os.sep in identifier or identifier.startswith('/')):
-        candidates = [identifier] + get_alternative_paths(identifier)
+        norm = os.path.normpath(identifier)
+        candidates: list[str] = [str(p) for p in get_alternative_paths(norm, including_path=True)]
         for path in candidates:
             path = path.rstrip('/')
             if path in PLEX_Media.OBJ_BY_FILEPATH:
@@ -44718,6 +44724,20 @@ def resolve_cache_items(identifier: str) -> list[tuple[str, Any]]:
                     obj = PLEX_Media.OBJ_BY_ID.get(key)
                     if obj:
                         found_items.append((key, obj))
+        # Also match exact Series / Season / Movie directory paths stored in obj['file']
+        if not found_items:
+            cand_set = {p.rstrip('/') for p in candidates}
+            for key, obj in PLEX_Media.OBJ_BY_ID.items():
+                if obj['type'] not in ('Series', 'Season', 'Movie'):
+                    continue
+                obj_file = (obj.get('file') or '').rstrip('/')
+                if obj_file and obj_file in cand_set:
+                    found_items.append((key, obj))
+        # Explicit filesystem path (/...): never fall back to title substring
+        # search or fuzzy alpha-only matching — an uncatalogued path must return
+        # [] so show_item_info reports it as not in Plex DB.
+        if not found_items and identifier.startswith('/'):
+            return []
 
     # Strategy 5: Partial key match or title/originalTitle search
     if not found_items:
@@ -44856,6 +44876,96 @@ def _print_item_ratings(obj: MediaRecord | CollectionRecord, visible: set[str]) 
             print(f"Summary:\t{summary}")
 
 
+def _report_uncatalogued_filepath(identifier: str) -> None:
+    """Explain clearly (without raising an error) when an explicit filepath
+    is not in Plex's DB / cache, with library, parent, and next-step hints."""
+    norm_path = os.path.normpath(identifier)
+    candidates: list[str] = [str(p) for p in get_alternative_paths(norm_path, including_path=True)]
+    cand_norms = [p.rstrip('/') for p in candidates]
+
+    known_raw: object = CACHE.get('plex_known_filepaths')
+    in_plex_known = (
+        isinstance(known_raw, (set, frozenset, list, tuple))
+        and any(c in cast('set[str] | frozenset[str] | list[str] | tuple[str, ...]', known_raw)
+                for c in cand_norms)
+    )
+
+    matched_lib: str | None = None
+    matched_root: str | None = None
+    library_stats: dict[str, Any] = CACHE.get('library_stats', {}) or {}
+    locations_by_lib: dict[str, list[str]] = library_stats.get('locations', {}) or {}
+    for lib_name, roots in locations_by_lib.items():
+        for rp in roots:
+            for rp_alt in get_alternative_paths(rp.rstrip('/'), including_path=True):
+                rp_norm = str(rp_alt).rstrip('/')
+                if any(c == rp_norm or c.startswith(rp_norm + '/') for c in cand_norms):
+                    if matched_root is None or len(rp_norm) > len(matched_root):
+                        matched_lib = lib_name
+                        matched_root = rp_norm
+
+    parent_key: str | None = None
+    parent_obj: MediaRecord | None = None
+    best_len = -1
+    for key, obj in PLEX_Media.OBJ_BY_ID.items():
+        if obj['type'] not in ('Series', 'Season', 'Movie'):
+            continue
+        obj_file = (obj.get('file') or '').rstrip('/')
+        if not obj_file:
+            continue
+        for obj_alt in get_alternative_paths(obj_file, including_path=True):
+            obj_norm = str(obj_alt).rstrip('/')
+            if any(c.startswith(obj_norm + '/') for c in cand_norms):
+                if len(obj_norm) > best_len:
+                    best_len = len(obj_norm)
+                    parent_key = key
+                    parent_obj = obj
+
+    ext = os.path.splitext(norm_path)[1].lower()
+    is_video = ext in VIDEO_EXTENSIONS
+
+    if in_plex_known:
+        print(f"Path is in Plex DB (media_parts) but missing from my-plex cache: {identifier}")
+    else:
+        kind_label = "Media file" if is_video else "Path"
+        print(f"{kind_label} is not in Plex DB / cache: {identifier}")
+
+    if matched_lib:
+        print(f"Library:\t{matched_lib}")
+    if parent_key and parent_obj:
+        p_type = parent_obj['type']
+        p_title = parent_obj.get('title') or parent_obj.get('series') or ''
+        print(f"Parent {p_type}:\t{parent_key}  {p_title}".rstrip())
+
+    if in_plex_known:
+        print("\nNext step:\n  my-plex --update-cache")
+        return
+
+    if not matched_lib:
+        print("\nNote:\tPath is not under any configured Plex library rootpath.")
+        print("  Check `my-plex --list-libraries` or `ALTERNATIVE_ROOTPATHS` in config.")
+        return
+
+    if parent_key and parent_obj and parent_obj['type'] in ('Series', 'Season'):
+        series_key = parent_key if parent_obj['type'] == 'Series' else (parent_obj.get('series_key') or parent_key)
+        parent_dir_name = os.path.basename(os.path.dirname(norm_path))
+        scan_locs = {loc for loc, _ in _parse_sort_new_locations()}
+        in_staging = parent_dir_name in scan_locs
+        has_sxex = bool(_re.search(r'S\d+E\d+', os.path.basename(norm_path), _re.IGNORECASE))
+        if is_video and (in_staging or not has_sxex):
+            if in_staging:
+                print(f"\nNote:\tFile sits inside staging directory '{parent_dir_name}/', which Plex ignores.")
+            else:
+                print("\nNote:\tEpisode filename has no SxxEyy numbering; Plex may ignore or misfile it.")
+            print("Next steps:")
+            print(f"  my-plex {series_key} --sort-new --dry-run")
+            print(f"  my-plex {series_key} --sort-new && my-plex --scan {matched_lib}")
+            return
+
+    print("\nNext steps:")
+    print(f"  my-plex --scan {matched_lib}")
+    print(f"  my-plex --unrecognized {matched_lib}")
+
+
 def show_item_info(identifier: str | None, table_only: bool = False) -> None:
     """Show detailed information about a Plex item by ID, key, or search term.
     If identifier is None or empty, shows general system information instead.
@@ -44870,6 +44980,9 @@ def show_item_info(identifier: str | None, table_only: bool = False) -> None:
     found_items = resolve_cache_items(identifier)
 
     if not found_items:
+        if identifier.startswith('/'):
+            _report_uncatalogued_filepath(identifier)
+            return
         print(f"✗ No items found matching '{identifier}'")
         print(f"\nTip: Try using the numeric ID (e.g., 2579) or full key (e.g., Episode_ID:2579)")
         return

@@ -3580,7 +3580,10 @@ def _fixture_library(d: str) -> str:
     for key, o in obj_by_id.items():
         obj_by_library.setdefault(o['library'], {}).setdefault(o['type'], []).append(key)
     with_files = {key: o for key, o in obj_by_id.items() if o['files']}
-    obj_by_filepath = {fi['filepath']: key for key, o in with_files.items() for fi in o['files'].values()}
+    obj_by_filepath: dict[str, list[str]] = {}
+    for key, o in with_files.items():
+        for fi in o['files'].values():
+            obj_by_filepath.setdefault(fi['filepath'], []).append(key)
     now = datetime(2026, 1, 1)
     stats: dict[str, dict[str, Any]] = {k: {} for k in ('updatedAt', 'plexUpdatedAt', 'itemsCount', 'episodesCount', 'totalDuration',
                              'totalStorage', 'agent', 'language', 'locations', 'language_distribution')}
@@ -7197,6 +7200,59 @@ class TestSortNewDatePrecedence(unittest.TestCase):
         self.assertNotIn('[absolute]', out)
         self.assertIn('Show_XXL_25.01.01_20-15_ard.avi -> specials/', out)
         self.assertIn('[abs-idx=25] S00E25: Show_-_25_-_Title.avi', out)
+
+
+class TestUncataloguedFilepathInfo(unittest.TestCase):
+    """Passing a filesystem path (/...) to `my-plex <PATH>` or `--info <PATH>`
+    must never abort with ERROR 00196 when the file is absent from Plex DB;
+    it must print guiding feedback (library, parent series, next steps) and
+    exit 0."""
+
+    def test_bare_filepath_known_and_uncatalogued(self):
+        conf = _fixture_conf()
+        # 1. Control: known episode file prints Episode card
+        r_known = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--config', conf,
+             '/lib/library_fr/Une Serie/S01/une.serie.s01e01.mkv'],
+            capture_output=True, text=True, timeout=E2E_TIMEOUT,
+        )
+        self.assertEqual(r_known.returncode, 0, r_known.stderr)
+        self.assertIn('Episode:', r_known.stdout)
+
+        # 2. Known series directory prints Series card
+        r_dir = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--config', conf,
+             '/lib/library_fr/Une Serie'],
+            capture_output=True, text=True, timeout=E2E_TIMEOUT,
+        )
+        self.assertEqual(r_dir.returncode, 0, r_dir.stderr)
+        self.assertIn('Series:', r_dir.stdout)
+
+        # 3. Uncatalogued media file inside staging dir (s0x) under series
+        uncat_staging = '/lib/library_fr/Une Serie/s0x/Show__Folge_79_26.09.26_20-15_zdf_150_TVOON_DE.HQ.mp4'
+        for argv in ([uncat_staging], ['--info', uncat_staging]):
+            r = subprocess.run(
+                [sys.executable, MAIN_SCRIPT, '--config', conf, *argv],
+                capture_output=True, text=True, timeout=E2E_TIMEOUT,
+            )
+            self.assertEqual(r.returncode, 0, f"{argv}: {r.stderr}")
+            self.assertNotIn('ERROR 00196', r.stderr)
+            self.assertIn('not in Plex DB', r.stdout)
+            self.assertIn('Library:\tlibrary_fr', r.stdout)
+            self.assertIn('Parent Series:', r.stdout)
+            self.assertIn('--sort-new --dry-run', r.stdout)
+            self.assertIn('--scan library_fr', r.stdout)
+
+        # 4. Uncatalogued path outside all library roots
+        r_out = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--config', conf,
+             '/outside/library/random.mkv'],
+            capture_output=True, text=True, timeout=E2E_TIMEOUT,
+        )
+        self.assertEqual(r_out.returncode, 0, r_out.stderr)
+        self.assertNotIn('ERROR 00196', r_out.stderr)
+        self.assertIn('not in Plex DB', r_out.stdout)
+        self.assertIn('not under any configured Plex library rootpath', r_out.stdout)
 
 
 class TestMismatched(unittest.TestCase):
@@ -19683,7 +19739,7 @@ _UNITTEST_SCOPES = {
     'renumber':   [TestRenumber],
     'move':       [TestMove],
     'original-languages': [TestOriginalLanguages],
-    'scope':              [TestUniversalScope, TestArgvValueFlags, TestBareLibraryScope],
+    'scope':              [TestUniversalScope, TestArgvValueFlags, TestBareLibraryScope, TestUncataloguedFilepathInfo],
     'unrecognized':       [TestUnrecognized],
     'layout':             [TestLayoutFilter, TestUncataloguedFolderMove],
     'compound':           [TestCompoundFilter],
