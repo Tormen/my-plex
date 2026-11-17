@@ -7118,7 +7118,7 @@ class TestSortNewDatePrecedence(unittest.TestCase):
             media.OBJ_BY_ID, media.OBJ_BY_LIBRARY, media.OBJ_BY_SERIES_EPISODES,
             lib.OBJ_DICT, lib.OBJ_DICT_TYPE, self.mp.PLEX_DB_REMOTE_HOST,
             self.mp.SORT_NEW_SCAN_LOCATIONS, self.mp._SORT_NEW_LOCATIONS_COMPILED,
-            self.mp.FORCE_TSV, self.mp.OFFLINE,
+            self.mp.FORCE_TSV, self.mp.OFFLINE, self.mp.VRB, self.mp.DBG,
         )
 
     def tearDown(self):
@@ -7128,7 +7128,7 @@ class TestSortNewDatePrecedence(unittest.TestCase):
             media.OBJ_BY_ID, media.OBJ_BY_LIBRARY, media.OBJ_BY_SERIES_EPISODES,
             lib.OBJ_DICT, lib.OBJ_DICT_TYPE, self.mp.PLEX_DB_REMOTE_HOST,
             self.mp.SORT_NEW_SCAN_LOCATIONS, self.mp._SORT_NEW_LOCATIONS_COMPILED,
-            self.mp.FORCE_TSV, self.mp.OFFLINE,
+            self.mp.FORCE_TSV, self.mp.OFFLINE, self.mp.VRB, self.mp.DBG,
         ) = self._saved
 
     def _setup_sort_new_fixture(
@@ -7256,7 +7256,39 @@ class TestSortNewDatePrecedence(unittest.TestCase):
         out_offline, mock_offline = _run_sort(stale_75, [fn_78], force_tsv=True, offline=True)
         self.assertEqual(mock_offline.call_count, 0)
         self.assertIn('[skip]', out_offline)
+        self.assertIn('--offline', out_offline)
         self.assertIn('--force-tsv', out_offline)
+
+    def test_sort_new_dry_run_summary_and_failure_reason_with_err_code(self):
+        from unittest import mock
+        fresh_78 = [{'season': 0, 'episode': 78, 'date': '2026-09-23', 'title': 'Folge 78'}]
+        fn_ok = 'Show__Folge_78_26.09.23_20-15_zdf_90_TVOON_DE.HQ.mp4'
+        fn_bad = 'Show_without_any_number_or_date.mkv'
+        self._setup_sort_new_fixture(fresh_78, [fn_ok, fn_bad])
+        self.mp.FORCE_TSV = False
+        self.mp.OFFLINE = False
+        self.mp.VRB = False
+        self.mp.DBG = False
+        out_buf = io.StringIO()
+        err_buf = io.StringIO()
+        args = mock.MagicMock(redo=False, yes=False, force=False)
+        with mock.patch.object(self.mp, 'is_episodes_tsv_stale', return_value=False), \
+             mock.patch.object(self.mp, 'scrape_episodes',
+                               return_value=({'source': 'fernsehserien.de', 'slug': 'test-show', 'series_id': '23209'}, fresh_78)), \
+             mock.patch.object(self.mp, '_sort_new_consolidate_season_wrappers', return_value=set()), \
+             mock.patch.object(self.mp, '_sort_new_movies'), \
+             mock.patch.object(self.mp, '_write_resolve_log'), \
+             contextlib.redirect_stdout(out_buf), \
+             contextlib.redirect_stderr(err_buf):
+            cmd_sort_new(args, dry_run=True, target='lib6')
+
+        out = out_buf.getvalue()
+        err_out = err_buf.getvalue()
+        self.assertIn('1 would sort, 1 failed', out)
+        self.assertNotIn('1 sorted', out)
+        self.assertIn('--try: 1 episodes would sort, 1 failed across 1 series.  No changes applied.', out)
+        self.assertNotIn('\nDone:', out)
+        self.assertRegex(err_out, r'ERROR \d{5} \[1\]: Series:3295: Show_without_any_number_or_date\.mkv: cannot determine SxxEyy')
 
     def test_sort_new_triggers_implicit_scan_and_cache_refresh(self):
         from unittest import mock
@@ -7361,7 +7393,16 @@ class TestUncataloguedFilepathInfo(unittest.TestCase):
             self.assertIn('Library:\tlibrary_fr', r.stdout)
             self.assertIn('Parent Series:', r.stdout)
             self.assertIn('--sort-new --dry-run', r.stdout)
-            self.assertIn('--scan library_fr', r.stdout)
+            self.assertNotIn('--scan', r.stdout)
+
+        # 3b. Uncatalogued file directly inside a normal season dir still suggests --scan
+        uncat_season = '/lib/library_fr/Une Serie/S01/une.serie.s01e09.mkv'
+        r_s = subprocess.run(
+            [sys.executable, MAIN_SCRIPT, '--config', conf, uncat_season],
+            capture_output=True, text=True, timeout=E2E_TIMEOUT,
+        )
+        self.assertEqual(r_s.returncode, 0, r_s.stderr)
+        self.assertIn('--scan library_fr', r_s.stdout)
 
         # 4. Uncatalogued path outside all library roots
         r_out = subprocess.run(
@@ -14855,7 +14896,7 @@ class TestErrCodes(unittest.TestCase):
 
     # [ \t]*\( -- a call written `err (1008, ...)` is a call: it escaped both this
     # check and the renumber one-liner for as long as the pattern demanded `err(`.
-    CALL = re.compile(r'(\b(?:err|_stamp_fail|_reencode_failed)[ \t]*\(\s*|_media_api_action[ \t]*\(media_identifier, action, )"?(\d+)"?(?=\s*[,)])')
+    CALL = re.compile(r'(\b(?:err|_stamp_fail|_reencode_failed|_nonfatal_err)[ \t]*\(\s*|_media_api_action[ \t]*\(media_identifier, action, )"?(\d+)"?(?=\s*[,)])')
     BARE = re.compile(r'\berr[ \t]*\(\s*(?!"\d{5}"|err_code\b)[^\s)]')
 
     def test_codes_are_unique_and_in_file_order(self):
@@ -14907,6 +14948,7 @@ class TestErrCodes(unittest.TestCase):
         kept a four-digit code while every other call was five digits."""
         for text in ('err ("00042", "x")', 'err("00042", "x")',
                      '_stamp_fail ("00042", "x")',
+                     '_nonfatal_err ("00042", "x")',
                      '_media_api_action (media_identifier, action, "00042")'):
             with self.subTest(text=text):
                 self.assertEqual([m.group(2) for m in self.CALL.finditer(text)],

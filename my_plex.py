@@ -6405,7 +6405,7 @@ def main_print_help(args: argparse.Namespace, remaining_args: list[str], main_pa
             print("    alone (no depth-1 videos + non-matching season layout).")
             print("  - Cache + disk_map.json are updated in-process; JSON log at")
             print("    ~/.my-plex/logs/sort_new_season_wrappers_<TS>.json.")
-            print("  - Run `my-plex --scan` afterwards so Plex re-catalogues the series.")
+            print("  - On non-dry runs, triggers a Plex scan + cache refresh automatically.")
             print()
             print("WHAT IS SCANNED — SORT_NEW_SCAN_LOCATIONS:")
             print()
@@ -39414,11 +39414,18 @@ def _start_encode(src: str, tmp: str, host: str | None, log: IO[bytes]) -> 'subp
                             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
 
 
+def _nonfatal_err(code: str, message: str) -> str:
+    """Report one item's non-fatal failure in err()'s shape with its five-digit
+    code and flush stdout first so piped 2>&1 output keeps it beside the item."""
+    sys.stdout.flush()
+    print(f"ERROR {code} [1]: {message}", file=sys.stderr)
+    return message
+
+
 def _reencode_failed(code: str, message: str) -> str:
     """Report one file's failure in err()'s shape -- the run goes on with
     the next file and exits 1 at its end.  Returns MESSAGE for the log."""
-    print(f"ERROR {code} [1]: {message}", file=sys.stderr)
-    return message
+    return _nonfatal_err(code, message)
 
 
 def _rescan_libraries(libraries: set[str]) -> None:
@@ -42084,11 +42091,12 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
             mkdir_cmd = [*_ssh_args(remote_host), f"mkdir -p {escaped_dir}"]
             result = subprocess.run(mkdir_cmd, capture_output=True, text=True)
             if result.returncode != 0:
-                print(f"    ERROR: mkdir {os.path.basename(target_dir_server)}/: {result.stderr.strip()}", file=sys.stderr)
+                _nonfatal_err("00177", f"{series_key}: mkdir {target_dir_server} failed: {result.stderr.strip()}")
                 return False
             dst_server = os.path.join(target_dir_server, new_name)
             success, _ = my_plex_file_operation('MOVE', src_server, remote_host, dest_path=dst_server)
             if not success:
+                _nonfatal_err("00178", f"{series_key}: failed to move {os.path.basename(src_server)} to {target_dir_server}/{new_name}")
                 return False
             # Sidecar sweep — same parent dir, name starts with `<src_stem>.`.
             src_dir = os.path.dirname(src_server)
@@ -42184,7 +42192,6 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
                     dry_run_lines.append((season, ep_num, f"    [dry-run] [filename] S{season:02d}E{ep_num:02d}: {fn}"))
                 else:
                     if not _sort_move(fp, target_dir, new_name):
-                        print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                         failed_count += 1
                         continue
                     print(f"    [filename] {fn} -> s{season:02d}/{new_name}")
@@ -42204,7 +42211,6 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
                     dry_run_lines.append((season, ep_num, f"    [dry-run] [filename] S{season:02d}E{ep_num:02d}: {fn}"))
                 else:
                     if not _sort_move(fp, target_dir, new_name):
-                        print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                         failed_count += 1
                         continue
                     print(f"    [filename] {fn} -> s{season:02d}/{new_name}")
@@ -42225,7 +42231,6 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
                     dry_run_lines.append((season, ep_num, f"    [dry-run] [prose] S{season:02d}E{ep_num:02d}: {fn}"))
                 else:
                     if not _sort_move(fp, target_dir, new_name):
-                        print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                         failed_count += 1
                         continue
                     print(f"    [prose] {fn} -> s{season:02d}/{new_name}")
@@ -42265,7 +42270,6 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
                         dry_run_lines.append((season, ep_num, f"    [dry-run] [tsv] {lookup_info} -> S{season:02d}E{ep_num:02d}: {fn}"))
                     else:
                         if not _sort_move(fp, target_dir, new_name):
-                            print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                             failed_count += 1
                             continue
                         print(f"    [tsv] {lookup_info} -> s{season:02d}/{new_name}")
@@ -42283,7 +42287,7 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
                                 subprocess.run(['bash', specials_script, fp], check=True, cwd=series_dir)
                                 print(f"    {fn} -> sort_specials.sh")
                             except subprocess.CalledProcessError as e:
-                                print(f"    ERROR: sort_specials.sh failed for {fn}: {e}", file=sys.stderr)
+                                _nonfatal_err("00179", f"{series_key}: sort_specials.sh failed for {fn}: {e}")
                                 failed_count += 1
                                 continue
                     else:
@@ -42296,7 +42300,6 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
                             dry_run_lines.append((0, ep_num, f"    [dry-run] {fn} -> specials/{new_name}"))
                         else:
                             if not _sort_move(fp, target_dir, new_name):
-                                print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                                 failed_count += 1
                                 continue
                             print(f"    {fn} -> specials/{new_name}")
@@ -42317,8 +42320,12 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
                     _hint += f" ({len(all_episodes)} eps known)"
                 else:
                     _hint += " (no scraped episode list)"
+                _refresh_hint = (
+                    "cached TSV not refreshed (--offline); re-run without -O or with --force-tsv"
+                    if OFFLINE else "refresh TSV (--force-tsv)"
+                )
                 print(f"    [skip] {fn}")
-                print(f"           {_hint} — fix series match (--mismatched) or refresh TSV (--force-tsv), then re-run with --redo")
+                print(f"           {_hint} — fix series match (--mismatched) or {_refresh_hint}, then re-run with --redo")
                 skipped_count += 1
                 continue
 
@@ -42356,7 +42363,6 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
                                 dry_run_lines.append((season, ep_num, f"    [dry-run] [absolute] S{season:02d}E{ep_num:02d}: {fn}"))
                             else:
                                 if not _sort_move(fp, target_dir, new_name):
-                                    print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                                     failed_count += 1
                                     continue
                                 print(f"    [absolute] {fn} -> s{season:02d}/{new_name}")
@@ -42379,7 +42385,6 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
                         dry_run_lines.append((season, ep_num, f"    [dry-run] [leading-num] S{season:02d}E{ep_num:02d}: {fn}"))
                     else:
                         if not _sort_move(fp, target_dir, new_name):
-                            print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                             failed_count += 1
                             continue
                         print(f"    [leading-num] {fn} -> s{season:02d}/{new_name}")
@@ -42405,7 +42410,6 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
                     dry_run_lines.append((season, ep_num, f"    [dry-run] [special] S00E{ep_num:02d}: {fn}"))
                 else:
                     if not _sort_move(fp, target_dir, new_name):
-                        print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                         failed_count += 1
                         continue
                     print(f"    [special] {fn} -> s00/{new_name}")
@@ -42438,7 +42442,6 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
                             dry_run_lines.append((season, ep_num, f"    [dry-run] [abs-idx={abs_num}] S{season:02d}E{ep_num:02d}: {fn}"))
                         else:
                             if not _sort_move(fp, target_dir, new_name):
-                                print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                                 failed_count += 1
                                 continue
                             print(f"    [abs-idx={abs_num}] {fn} -> s{season:02d}/{new_name}")
@@ -42478,23 +42481,15 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
                         dry_run_lines.append((season, ep_num, f"    [dry-run] [year] {file_year} -> S{season:02d}E{ep_num:02d}: {fn}"))
                     else:
                         if not _sort_move(fp, target_dir, new_name):
-                            print(f"    ERROR: Failed to move {fn}", file=sys.stderr)
                             failed_count += 1
                             continue
                         print(f"    [year] {file_year} -> s{season:02d}/{new_name}")
                     sorted_count += 1
                     continue
-            # Not a real warning — many legitimate naming schemes
-            # don't carry dates (e.g. `Seinfeld-101-Pilot.avi`,
-            # `Es_war_einmal_das_Leben_-_25_-_…`).  Counts as a
-            # failed sort but only chatters under -D / -V; otherwise
-            # silent to keep the --sort-new output clean.
-            if VRB or DBG:
-                msg = f"    (no date in: {fn})"
-                if dry_run:
-                    dry_run_lines.append((9999, 0, msg))
-                else:
-                    print(msg)
+            _nonfatal_err(
+                "00180",
+                f"{series_key}: {fn}: cannot determine SxxEyy (no SxxEyy marker, air date, or matching episode)",
+            )
             failed_count += 1
             continue
 
@@ -42616,7 +42611,7 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
                         mkdir_cmd = [*_ssh_args(remote_host), f"mkdir -p {escaped_dir}"]
                         result = subprocess.run(mkdir_cmd, capture_output=True, text=True)
                         if result.returncode != 0:
-                            print(f"    ERROR: mkdir {dir_name}/: {result.stderr.strip()}", file=sys.stderr)
+                            _nonfatal_err("00181", f"[{lib_name}] mkdir {dir_name}/ failed: {result.stderr.strip()}")
                             movie_failed += 1
                             lib_failed_count += 1
                             continue
@@ -42649,7 +42644,7 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
                                     else:
                                         print(f"      ⚠ touch placeholder failed: {os.path.basename(src_path)} ({tr.stderr.strip()})")
                         else:
-                            print(f"    ERROR: {fn}: some files failed to move", file=sys.stderr)
+                            _nonfatal_err("00182", f"[{lib_name}] {fn}: failed to move into {dir_name}/")
                             movie_failed += 1
                             lib_failed_count += 1
 
@@ -42662,19 +42657,20 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
     single_target = target and target not in PLEX_Library.OBJ_DICT
 
     if total_series_processed > 0 or movie_libs_processed > 0:
+        verb = "would sort" if dry_run else "sorted"
         if not single_target:
             # Per-item summary
             if series_summaries or movie_summaries:
                 print(f"\nSummary:")
                 for s_key, lib_name, series_title, unsorted_count, sorted_count, failed_count, skipped_count in series_summaries:
-                    status = f"{sorted_count} sorted"
+                    status = f"{sorted_count} {verb}"
                     if failed_count > 0:
                         status += f", {failed_count} failed"
                     if skipped_count > 0:
                         status += f", {skipped_count} skipped (no certain SxxEyy)"
                     print(f"  {s_key}: [{lib_name}] [{series_title}] {unsorted_count} unsorted file(s), {status}")
                 for lib_name, bare_count, sorted_count, failed_count in movie_summaries:
-                    status = f"{sorted_count} sorted"
+                    status = f"{sorted_count} {verb}"
                     if failed_count > 0:
                         status += f", {failed_count} failed"
                     print(f"  [{lib_name}] {bare_count} movie file(s) without directory, {status}")
@@ -42682,10 +42678,13 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
             # Totals
             parts: list[str] = []
             if total_series_processed > 0:
-                parts.append(f"{total_sorted} episodes sorted, {total_failed} failed across {total_series_processed} series")
+                parts.append(f"{total_sorted} episodes {verb}, {total_failed} failed across {total_series_processed} series")
             if movie_libs_processed > 0:
-                parts.append(f"{movie_sorted} movies sorted, {movie_failed} failed across {movie_libs_processed} library(ies)")
-            print(f"\nDone: {'; '.join(parts)}")
+                parts.append(f"{movie_sorted} movies {verb}, {movie_failed} failed across {movie_libs_processed} library(ies)")
+            if dry_run:
+                print(f"\n--try: {'; '.join(parts)}.  No changes applied.")
+            else:
+                print(f"\nDone: {'; '.join(parts)}")
     else:
         print("\nNothing to sort.")
 
@@ -42975,7 +42974,7 @@ def _handle_label_command(label_args: list[str], action: Literal['add', 'remove'
     label_args: list from argparse nargs='+', first element is label, rest is scope.
     action: 'add' or 'remove'."""
     if len(label_args) < 2:
-        err("00177", f"--{action}-label requires at least 2 arguments: LABEL SCOPE\n"
+        err("00183", f"--{action}-label requires at least 2 arguments: LABEL SCOPE\n"
             f"  Usage: my-plex --{action}-label 'my-label' Movie:123\n"
             f"         my-plex --{action}-label 'my-label' 'Tagesschau'\n"
             f"         my-plex --{action}-label 'my-label' lib6\n"
@@ -42996,7 +42995,7 @@ def _handle_label_command(label_args: list[str], action: Literal['add', 'remove'
         except SystemExit:
             obj_keys = []
         if not obj_keys:
-            err("00178", f"'{scope_str}' not found as library, cache key, Plex ID, or title.\n"
+            err("00184", f"'{scope_str}' not found as library, cache key, Plex ID, or title.\n"
                 f"  Use --help {action}-label for usage.")
 
     if not obj_keys:
@@ -43069,7 +43068,7 @@ def _resolve_label_target(identifier: str) -> tuple[MediaRecord, str]:
         for key, cached_obj in PLEX_Media.OBJ_BY_ID.items():
             if cached_obj.get('id') == plex_id and cached_obj['type'] != 'Collection':
                 return cached_obj, key
-        err("00179", f"Media item with PLEX-ID {plex_id} not found in cache. Try updating cache with --update-cache.")
+        err("00185", f"Media item with PLEX-ID {plex_id} not found in cache. Try updating cache with --update-cache.")
     except ValueError:
         pass
 
@@ -43090,9 +43089,9 @@ def _resolve_label_target(identifier: str) -> tuple[MediaRecord, str]:
     elif len(matches) > 1:
         match_strs = [f"{k} ({o.get('title', '?')})" for o, k in matches[:5]]
         suffix = f' ... and {len(matches)-5} more' if len(matches) > 5 else ''
-        err("00180", f"Ambiguous: '{identifier}' matches {len(matches)} items. Use a cache key (e.g. Movie:123) to be precise.\n"
+        err("00186", f"Ambiguous: '{identifier}' matches {len(matches)} items. Use a cache key (e.g. Movie:123) to be precise.\n"
             f"  Matches: {', '.join(match_strs)}{suffix}")
-    err("00181", f"'{identifier}' not found in cache. Try updating cache with --update-cache.")
+    err("00187", f"'{identifier}' not found in cache. Try updating cache with --update-cache.")
 
 
 def add_label_to_item(label: str, plex_id: str) -> Literal['exists', 'added', 'error']:
@@ -43108,7 +43107,7 @@ def add_label_to_item(label: str, plex_id: str) -> Literal['exists', 'added', 'e
         library: PlexAPIObject = PLEX_Library.OBJ_DICT[library_name]
         item: PlexAPIObject = library.fetchItem(obj['item_id'])
     except PLEX_ERRORS as e:
-        err("00182", f"Failed to fetch media item from Plex server: {e}")
+        err("00188", f"Failed to fetch media item from Plex server: {e}")
 
     # Check if label already exists
     if label in [l.tag for l in item.labels]:
@@ -43141,7 +43140,7 @@ def remove_label_from_item(label: str, plex_id: str) -> Literal['not_found', 're
         library: PlexAPIObject = PLEX_Library.OBJ_DICT[library_name]
         item: PlexAPIObject = library.fetchItem(obj['item_id'])
     except PLEX_ERRORS as e:
-        err("00183", f"Failed to fetch media item from Plex server: {e}")
+        err("00189", f"Failed to fetch media item from Plex server: {e}")
 
     # Check if label exists
     if label not in [l.tag for l in item.labels]:
@@ -45054,7 +45053,7 @@ def _report_uncatalogued_filepath(identifier: str) -> None:
                 print("\nNote:\tEpisode filename has no SxxEyy numbering; Plex may ignore or misfile it.")
             print("Next steps:")
             print(f"  my-plex {series_key} --sort-new --dry-run")
-            print(f"  my-plex {series_key} --sort-new && my-plex --scan {matched_lib}")
+            print(f"  my-plex {series_key} --sort-new")
             return
 
     print("\nNext steps:")
@@ -45485,7 +45484,7 @@ def _refuse_words_rewritten_beside(flag: str, takes: str) -> None:
     if not _ARGV_REWRITTEN:
         return
     words = ", ".join(f"'{w}'" for w, _ in _ARGV_REWRITTEN)
-    err("00184", f"Invalid parameter{'s' if len(_ARGV_REWRITTEN) > 1 else ''} {words} beside {flag}, "
+    err("00190", f"Invalid parameter{'s' if len(_ARGV_REWRITTEN) > 1 else ''} {words} beside {flag}, "
                  f"which takes only {takes} and exits before any --list filter is read.\n"
                  "Possible reasons:\n"
                  "  - the word was meant for another option, or as a second value\n"
@@ -45515,7 +45514,7 @@ def execute_global_commands(args: argparse.Namespace, cmd_args: argparse.Namespa
     if _missing_val is not None:
         # v2.0 (nargs='*'): bare --missing gives [] — treat as "no series ref"
         if _missing_val is True or _missing_val == [] or _missing_val == '':
-            err("00185", "--missing requires a series reference (title, Plex ID, or filepath)\n"
+            err("00191", "--missing requires a series reference (title, Plex ID, or filepath)\n"
                 "  Usage: my-plex --missing <show>\n"
                 "         my-plex <library> --missing  (all series in library)\n"
                 "         my-plex <show> --missing     (specific series)\n"
@@ -45571,7 +45570,7 @@ def execute_global_commands(args: argparse.Namespace, cmd_args: argparse.Namespa
                    safe_getattr(args, 'sync', None))
     if sync_target is not None:
         if args.force:
-            err("00186", "--force cannot be used with --sync / --plex-disk-sync\n"
+            err("00192", "--force cannot be used with --sync / --plex-disk-sync\n"
                 "  --force is destructive and requires an explicit direction:\n"
                 "    my-plex --plex2disk --force   (Plex overwrites disk — removes markers for unwatched items)\n"
                 "    my-plex --disk2plex --force   (disk overwrites Plex — marks unwatched in Plex where no marker)")
@@ -45834,7 +45833,7 @@ def execute_global_commands(args: argparse.Namespace, cmd_args: argparse.Namespa
     # Validate parameter dependencies BEFORE checking if commands should run
     # Check if --type is used without --list, --duplicates, or --broken
     if safe_getattr(cmd_args, 'type', None) and not (safe_getattr(cmd_args, 'list', False) or safe_getattr(cmd_args, 'duplicates', False) or safe_getattr(cmd_args, 'broken', False)):
-        err("00187", "--type can only be used together with --list, --duplicates, or --broken.\nExample: my-plex --list --type movie")
+        err("00193", "--type can only be used together with --list, --duplicates, or --broken.\nExample: my-plex --list --type movie")
 
     # Check if --resolve is used without a resolve-capable command.
     # Resolve-capable commands today: --duplicates, --no-audio-language,
@@ -45852,14 +45851,14 @@ def execute_global_commands(args: argparse.Namespace, cmd_args: argparse.Namespa
         or safe_getattr(cmd_args, 'problems', None) is not None
     )
     if safe_getattr(cmd_args, 'resolve', False) and not _resolve_capable_flags:
-        err("00188", "--resolve can only be used together with one of:\n"
+        err("00194", "--resolve can only be used together with one of:\n"
                   "  --duplicates / --no-audio-language / --junk / --naming /\n"
                   "  --unmatched / --bad-structure / --problems\n"
                   "Example: my-plex --problems --resolve")
 
     # Check if --collections is used without a library (global context = no library)
     if safe_getattr(cmd_args, 'collections', False):
-        err("00189", "--collections requires a library name.\nExample: my-plex lib1 --collections")
+        err("00195", "--collections requires a library name.\nExample: my-plex lib1 --collections")
 
     # Handle --problems: run all problem detection checks with summary
     problems_val = safe_getattr(cmd_args, 'problems', None)
@@ -45958,7 +45957,7 @@ def execute_global_commands(args: argparse.Namespace, cmd_args: argparse.Namespa
 
     # --tsv/--scrape requires --problems (which already returned above)
     if safe_getattr(cmd_args, 'tsv', False):
-        err("00190", "--tsv/--scrape can only be used together with --problems.\nExample: my-plex --problems --tsv")
+        err("00196", "--tsv/--scrape can only be used together with --problems.\nExample: my-plex --problems --tsv")
 
     # Handle --unmatched [SCOPE]: list items not matched by Plex metadata agent
     unmatched_val = safe_getattr(cmd_args, 'unmatched', None)
@@ -46322,14 +46321,14 @@ def detect_PLEX_OBJ_TYPE(args: argparse.Namespace, obj: str) -> str | None: # de
         else:
             if DBG: print( f"{DBGPFX}detect_PLEX_OPJ_TYPE: obj is NOT of type '{obj_type}'" )
     return None
-    #err("00191", f"Failed to determine PLEX OBJ_TYPE of provided PLEX_OBJ \"{obj}\". Please check.")
+    #err("00197", f"Failed to determine PLEX OBJ_TYPE of provided PLEX_OBJ \"{obj}\". Please check.")
 
 def execute_plex_cmd(args: argparse.Namespace, obj: str, obj_type: str, obj_args_list: list[str]) -> list[str]:
     """ obj_args_list will be all remaining_args when PLEX_OBJ was found.
         --> we will try parse ALL. If this fails pop off last one, try again, ... until we might succeed."""
     if DBG: print( f"{DBGPFX}execute_plex_cmd(args={args}, obj={obj}, obj_type={obj_type}, obj_args_list={obj_args_list})")
-    if obj_type not in PLEXOBJ[PARSER]: err("00192", f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
-    if obj_type not in PLEXOBJ[FN]: err("00193", f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
+    if obj_type not in PLEXOBJ[PARSER]: err("00198", f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
+    if obj_type not in PLEXOBJ[FN]: err("00199", f"Invalid obj_type '{obj_type}'. Please contact maintainer with output when adding --debug.")
     obj_parser: argparse.ArgumentParser = PLEXOBJ[PARSER][obj_type]
     remaining_args: list[str] = []
     no_args_given = len(obj_args_list) == 0
@@ -46381,7 +46380,7 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args: argparse.Namespace, remaining_args
         safe_getattr(args, 'plex_disk_sync', None) or safe_getattr(args, 'sync', None))
     if _early_sync is not None and not remaining_args:
         if args.force:
-            err("00194", "--force cannot be used with --sync / --plex-disk-sync")
+            err("00200", "--force cannot be used with --sync / --plex-disk-sync")
         _dry_run = safe_getattr(args, 'dry_run', False)
         # Inline equivalent of execute_global_commands._collapse_scope_arg.
         if _early_sync is True:
@@ -46420,7 +46419,7 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args: argparse.Namespace, remaining_args
                     # If arg is still in unparsed, it means it wasn't recognized as a valid global command flag
                     if cmd_args is not None and arg in unparsed:
                         # The flag wasn't recognized - it's an invalid flag
-                        err("00195", f"Invalid flag '{arg}'. Not a recognized global command flag."
+                        err("00201", f"Invalid flag '{arg}'. Not a recognized global command flag."
                                      + _flag_hint(arg))
                     if cmd_args is not None: # if we found GLOBAL_CMD: execute && continue
                         if DBG: print( f"{DBGPFX}MAIN DOIT LOOP: Found GLOBAL_CMD, executing cmd_args {cmd_args}" )
@@ -46447,10 +46446,10 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args: argparse.Namespace, remaining_args
         else:                      # no PLEXOBJECT and NO GLOBAL_CMD
             match state:
                 case 0:            # in state 0 this should not be: every param needs to be /either/ PLEXOBJECT /or/ GLOBAL_CMD!
-                    if obj is None: err("00196", f"Invalid parameter '{arg}'. No parameter and unable to determine CMD_OR_PLEXOBJECT. Please check.")
+                    if obj is None: err("00202", f"Invalid parameter '{arg}'. No parameter and unable to determine CMD_OR_PLEXOBJECT. Please check.")
                     # Series helpful error with available libraries
                     available_libs = ', '.join(sorted(PLEX_Library.OBJ_DICT.keys()))
-                    err("00197", f"Invalid CMD_OR_PLEXOBJECT '{obj}'\n(it is no GLOBAL_COMMAND and no PLEX_OBJ).\n\nAvailable libraries: {available_libs}\n\nUse 'my-plex --list-libraries' for more details or --help for available commands.")
+                    err("00203", f"Invalid CMD_OR_PLEXOBJECT '{obj}'\n(it is no GLOBAL_COMMAND and no PLEX_OBJ).\n\nAvailable libraries: {available_libs}\n\nUse 'my-plex --list-libraries' for more details or --help for available commands.")
                 case 1: # PLEXOBJECT of obj_type found (before): And now NO GLOBAL_CMD & NO new PLEXOBJ --> add arg to obj_args_list
                     obj_args_list.append(arg)
                     if DBG: print( f"{DBGPFX}MAIN DOIT LOOP|state 1| Found new arg for obj_args_list --> now {len(obj_args_list)} items." )
@@ -46458,10 +46457,10 @@ def parse_and_execute_CMD_OR_PLEXOBJECT(args: argparse.Namespace, remaining_args
                     if DBG: print( f"{DBGPFX}MAIN DOIT LOOP|state 1 --> state 3| as no remaining_args left!" )
                     state = 3;
                 case _: # state 2 should NEVER happen here as state 2 should only be set IF PLEXOBJECT FOUND and then directly USED below!
-                    err("00198", f"Invalid state '{state}'. Please contact maintainer with output when adding --debug.")
+                    err("00204", f"Invalid state '{state}'. Please contact maintainer with output when adding --debug.")
 
         # We have PLEX_OBJECT obj + obj_args_list + obj_type and EITHER
-        if (state != 2 and state != 3): err("00199", f"Invalid state '{state}'. Please contact maintainer with output when adding --debug.")
+        if (state != 2 and state != 3): err("00205", f"Invalid state '{state}'. Please contact maintainer with output when adding --debug.")
 
         execute_plex_cmd(args, obj, obj_type, obj_args_list)  # pyright: ignore[reportArgumentType]  # states 2 and 3 come only after obj and obj_type were set
         match state:
@@ -46517,7 +46516,7 @@ def _resolve_secret_arg(flag: str, value: str | None) -> str | None:
             with open(path) as f:
                 return f.readline().strip()
         except OSError as e:
-            err("00200", f"{flag} @{path}: cannot read it -- {e}")
+            err("00206", f"{flag} @{path}: cannot read it -- {e}")
     print(f"\n\u26a0  WARNING: {flag} was given its value on the command line.\n"
           f"   It is now in your shell history, and `ps auxww` showed it to every\n"
           f"   user on this machine while my-plex ran.\n"
@@ -46559,7 +46558,7 @@ def refuse_legacy_keys(loaded_config: dict[str, object]) -> None:
              + "".join(f"\n      set in {_config_file_label(p)}"
                        for p in CONFIG_RECORD['set_by'][k])
              for k in legacy_set]
-    err("00201", "Legacy config key(s) found:\n" + "\n".join(lines) +
+    err("00207", "Legacy config key(s) found:\n" + "\n".join(lines) +
            "\n  Delete each from the file that sets it to continue.")
 
 
@@ -46661,7 +46660,7 @@ def main():
     # config its old twin --config-file names is not read first.
     _before_dashdash = sys.argv[1:sys.argv.index('--')] if '--' in sys.argv else sys.argv[1:]
     if any(a.split('=', 1)[0] == '--create' for a in _before_dashdash):
-        err("00202", "Invalid flag '--create'." + _flag_hint('--create'))
+        err("00208", "Invalid flag '--create'." + _flag_hint('--create'))
     # No abbreviations, as in every other parser of the tool: here a prefix of
     # --create-config ('--creat FILE') would write a config nobody asked for.
     config_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
@@ -46704,7 +46703,7 @@ def main():
             if any(w in _CREATE_CONFIG_QUIET for w in _beside):
                 _hint += ("\n  Without a FILE the template on stdout is this run's only output:"
                           " -Q would silence it.")
-            err("00203", f"Invalid parameter{'s' if len(_beside) > 1 else ''} "
+            err("00209", f"Invalid parameter{'s' if len(_beside) > 1 else ''} "
                          + ", ".join(f"'{w}'" for w in _beside)
                          + " beside --create-config, which takes only its FILE, -V, -VV, -D, -DD,"
                            " and -Q only with a FILE."
@@ -46723,16 +46722,16 @@ def main():
             # the link first: isdir and isfile look through it
             _kind = ('a link' if os.path.islink(target) else 'a directory' if os.path.isdir(target)
                      else 'a file' if os.path.isfile(target) else 'something else')
-            err("00204", f"refusing to write the config: {target} exists ({_kind})")
+            err("00210", f"refusing to write the config: {target} exists ({_kind})")
         except OSError as e:
-            err("00205", f"cannot create the config {target}: {e.strerror}")
+            err("00211", f"cannot create the config {target}: {e.strerror}")
         try:
             os.fchmod(fd, 0o600)  # exactly 0600, whatever the umask took away
             with os.fdopen(fd, 'w') as f:
                 f.write(config_content)
         except OSError as e:
             os.unlink(target)  # created by this run a moment ago: no half config left
-            err("00206", f"cannot write the config {target}: {e.strerror}")
+            err("00212", f"cannot write the config {target}: {e.strerror}")
         print(f"Created config file: {target} (mode 0600)")
         print(f"Please edit this file to set your PLEX_URL and PLEX_TOKEN (or PLEX_XML_URL)")
         sys.exit(0)
@@ -47505,7 +47504,7 @@ def main():
     try:
         (args, remaining_args) = main_parser.parse_known_args()
     except (argparse.ArgumentError, SystemExit) as e:
-        err("00207", f"{e}\nUse --help to see available options.")
+        err("00213", f"{e}\nUse --help to see available options.")
     # A near-miss is answered by the flag it misses, before any positional
     # word is judged: otherwise `--creat FILE` is refused for its FILE.
     _known = {o for p in (main_parser, GLOBAL_CMD_PARSER)
@@ -47513,14 +47512,14 @@ def main():
     for _w in remaining_args:
         _m = _meant_flag(_w, _known)
         if _m is not None:
-            err("00208", f"Invalid flag '{_w}'.\n  You mean '{_m}' -- no option of my-plex takes a shortened name.")
+            err("00214", f"Invalid flag '{_w}'.\n  You mean '{_m}' -- no option of my-plex takes a shortened name.")
     # The second root check.  The first one, in my_plex_boot.main(), judged
     # argv before any parser existed; whether this run IS a help request is
     # the parser's answer, so a root run it misjudged as print-only stops
     # here, before any command runs.  (The bare run is the usage, and
     # --version was answered at import.)
     if _AS_ROOT and args.help is None and len(sys.argv) > 1:
-        err("00209", _boot.root_refusal())
+        err("00215", _boot.root_refusal())
     DBG = args.debug
     DEEPDBG = args.deepdebug
     VRB = args.verbose
@@ -47552,11 +47551,11 @@ def main():
 
     # Check if --force is used without --update-cache
     if args.force and not args.update_cache:
-        err("00210", "--force can only be used together with --update-cache.\nExample: my-plex --update-cache --force")
+        err("00216", "--force can only be used together with --update-cache.\nExample: my-plex --update-cache --force")
 
     # Check if --force-plex is used without --update-cache
     if args.from_scratch and not args.update_cache:
-        err("00211", "--force-plex can only be used together with --update-cache.\nExample: my-plex --update-cache --force-plex")
+        err("00217", "--force-plex can only be used together with --update-cache.\nExample: my-plex --update-cache --force-plex")
 
     # Confirm --force-plex operation (deletes cache and rebuilds)
     if args.from_scratch and args.update_cache:
@@ -48085,7 +48084,7 @@ def report_bug(unexpected: Exception) -> NoReturn:
     fixes the bug, it is just not the user's screen -- and exit 70
     (EX_SOFTWARE).  Called from inside an `except`, for every run: run()'s,
     and the root half of --install, which runs outside run()."""
-    err("00212",
+    err("00218",
         f"my-plex stopped on a bug -- this is not something you did wrong.\n"
         f"  what happened: {type(unexpected).__name__}: {unexpected}\n"
         f"  full trace:    {_write_crash_trace()}\n"

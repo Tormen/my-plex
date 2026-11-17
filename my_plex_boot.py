@@ -25,11 +25,11 @@ owner here that the tool imports rather than a copy of its own.
 # Error codes: err() takes a five-digit string code ("00042"), UNIQUE per
 # source line, numbered from 00001 in file order with no gap across BOTH
 # files -- this one first, then my_plex.py -- so grepping a code lands on the
-# one line that raised it.  _stamp_fail(), _reencode_failed() and the
-# _media_api_action() callers in my_plex.py share the numbering.  After adding a call (any placeholder
-# code), renumber both files with one counter (`my-plex --run-tests errcodes`
-# checks the result):
-#   perl -0pi -e 'BEGIN{$n=0} s/(\b(?:err|_stamp_fail|_reencode_failed)[ \t]*\(\s*|_media_api_action[ \t]*\(media_identifier, action, )"?\d+"?(?=\s*[,)])/sprintf("%s\"%05d\"",$1,++$n)/ge' my_plex_boot.py my_plex.py
+# one line that raised it.  _stamp_fail(), _reencode_failed(), _nonfatal_err()
+# and the _media_api_action() callers in my_plex.py share the numbering.  After
+# adding a call (any placeholder code), renumber both files with one counter
+# (`my-plex --run-tests errcodes` checks the result):
+#   perl -0pi -e 'BEGIN{$n=0} s/(\b(?:err|_stamp_fail|_reencode_failed|_nonfatal_err)[ \t]*\(\s*|_media_api_action[ \t]*\(media_identifier, action, )"?\d+"?(?=\s*[,)])/sprintf("%s\"%05d\"",$1,++$n)/ge' my_plex_boot.py my_plex.py
 
 import os
 import subprocess
