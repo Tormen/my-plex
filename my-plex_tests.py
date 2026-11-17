@@ -7258,6 +7258,69 @@ class TestSortNewDatePrecedence(unittest.TestCase):
         self.assertIn('[skip]', out_offline)
         self.assertIn('--force-tsv', out_offline)
 
+    def test_sort_new_triggers_implicit_scan_and_cache_refresh(self):
+        from unittest import mock
+        fresh_78 = [{'season': 0, 'episode': 78, 'date': '2026-09-23', 'title': 'Folge 78'}]
+        fn_78 = 'Show__Folge_78_26.09.23_20-15_zdf_90_TVOON_DE.HQ.mp4'
+        fn_skip = 'Show__Folge_99_26.11.01_20-15_zdf_90_TVOON_DE.HQ.mp4'
+
+        def _run_implicit(files, *, dry_run, offline):
+            self._setup_sort_new_fixture(fresh_78, files)
+            self.mp.FORCE_TSV = False
+            self.mp.OFFLINE = offline
+            mock_sec = mock.MagicMock()
+            mock_plex = mock.MagicMock()
+            mock_plex.library.section.return_value = mock_sec
+            buf = io.StringIO()
+            args = mock.MagicMock(redo=False, yes=False, force=False)
+            with mock.patch.object(self.mp, 'is_episodes_tsv_stale', return_value=False), \
+                 mock.patch.object(self.mp, 'scrape_episodes',
+                                   return_value=({'source': 'fernsehserien.de', 'slug': 'test-show', 'series_id': '23209'}, fresh_78)), \
+                 mock.patch.object(self.mp, '_sort_new_consolidate_season_wrappers', return_value=set()), \
+                 mock.patch.object(self.mp, '_sort_new_movies'), \
+                 mock.patch.object(self.mp, '_write_resolve_log'), \
+                 mock.patch.object(self.mp, 'my_plex_file_operation', return_value=(True, [])), \
+                 mock.patch.object(self.mp.subprocess, 'run',
+                                   return_value=mock.MagicMock(returncode=0, stdout='', stderr='')), \
+                 mock.patch.object(self.mp, 'ensure_plex_api', return_value=mock_plex) as plex_mock, \
+                 mock.patch.object(self.mp, 'wait_for_plex_scan_complete',
+                                   return_value=(True, 0.2)) as wait_mock, \
+                 mock.patch.object(self.mp, 'update_cache_for_library') as cache_mock, \
+                 contextlib.redirect_stdout(buf):
+                cmd_sort_new(args, dry_run=dry_run, target='Series:3295')
+            return buf.getvalue(), plex_mock, mock_plex, mock_sec, wait_mock, cache_mock
+
+        # 1. Real run that sorts a file triggers Plex scan + wait + cache refresh for affected lib
+        out_real, plex_m, mock_plex, mock_sec, wait_m, cache_m = _run_implicit([fn_78], dry_run=False, offline=False)
+        self.assertEqual(plex_m.call_count, 1)
+        mock_plex.library.section.assert_called_once_with('lib6')
+        mock_sec.update.assert_called_once_with()
+        wait_m.assert_called_once_with(mock_plex, 'lib6', mock_sec, max_wait=300, verbose=False)
+        cache_m.assert_called_once_with(None)
+        self.assertIn('scan completed', out_real)
+        self.assertIn('Cache refreshed', out_real)
+
+        # 2. --dry-run must NOT trigger Plex scan or cache refresh
+        _out_dry, plex_dry, _mp2, sec_dry, wait_dry, cache_dry = _run_implicit([fn_78], dry_run=True, offline=False)
+        self.assertEqual(plex_dry.call_count, 0)
+        sec_dry.update.assert_not_called()
+        wait_dry.assert_not_called()
+        cache_dry.assert_not_called()
+
+        # 3. Real run where 0 files sorted ([skip]) must NOT trigger Plex scan or cache refresh
+        _out_skip, plex_skip, _mp3, sec_skip, wait_skip, cache_skip = _run_implicit([fn_skip], dry_run=False, offline=False)
+        self.assertEqual(plex_skip.call_count, 0)
+        sec_skip.update.assert_not_called()
+        wait_skip.assert_not_called()
+        cache_skip.assert_not_called()
+
+        # 4. --offline real run must NOT trigger Plex scan or cache refresh
+        _out_off, plex_off, _mp4, sec_off, wait_off, cache_off = _run_implicit([fn_78], dry_run=False, offline=True)
+        self.assertEqual(plex_off.call_count, 0)
+        sec_off.update.assert_not_called()
+        wait_off.assert_not_called()
+        cache_off.assert_not_called()
+
 
 class TestUncataloguedFilepathInfo(unittest.TestCase):
     """Passing a filesystem path (/...) to `my-plex <PATH>` or `--info <PATH>`

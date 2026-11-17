@@ -6458,6 +6458,10 @@ def main_print_help(args: argparse.Namespace, remaining_args: list[str], main_pa
             print()
             print("  --dry-run / -n   Show what would be done without moving files.")
             print()
+            print("  On non-dry runs where files were moved or sorted, --sort-new")
+            print("  automatically triggers a Plex scan, waits for completion, and")
+            print("  refreshes the cache for each affected library (unless --offline).")
+            print()
             print("  episodes.tsv is auto-updated from the episode data source (see")
             print("  EPISODE-DATA-SOURCE column in --list-libraries) if older than 24 hours,")
             print("  once per series when an unsorted dated file is missing from a cached TSV,")
@@ -41770,7 +41774,6 @@ def _sort_new_consolidate_season_wrappers(all_series_list: Sequence[tuple[str, M
     })
     if log_path:
         print(f"  Log: {log_path}")
-    print(f"  Run `my-plex --scan` so Plex re-catalogues the consolidated series.")
     return consolidated_keys
 
 
@@ -41840,6 +41843,27 @@ def _load_sort_new_episodes(
     return metadata, all_episodes
 
 
+def _trigger_plex_scan_and_refresh_cache(affected_libs: set[str]) -> None:
+    """Trigger a Plex library scan, wait for completion, and refresh cache for affected libraries."""
+    if not affected_libs or OFFLINE or READ_ONLY_MODE:
+        return
+    noun = 'library' if len(affected_libs) == 1 else 'libraries'
+    print(f"\nTriggering Plex scan + waiting for {len(affected_libs)} affected {noun}: {', '.join(sorted(affected_libs))}")
+    plex = ensure_plex_api(required=False)
+    if plex is None:
+        return
+    for lib_name in sorted(affected_libs):
+        try:
+            sec = plex.library.section(lib_name)
+            sec.update()
+            ok, elapsed = wait_for_plex_scan_complete(plex, lib_name, sec, max_wait=300, verbose=False)
+            print(f"  {lib_name}: scan {'completed' if ok else 'timed out'} in {elapsed:.1f}s")
+        except PLEX_ERRORS as e:
+            print(f"  {lib_name}: scan failed: {e}")
+    update_cache_for_library(None)
+    print("Cache refreshed; ready for next command.")
+
+
 def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None) -> None:
     """Sort unsorted recordings into season directories for all series.
 
@@ -41875,9 +41899,14 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
     # ('<series>.s01.<release junk>' catalogued as its own series) into
     # <library_root>/<series>/s<NN>/.  Consolidated series leave the
     # per-series sort loop — their directories are gone.
+    affected_libs: set[str] = set()
     _consolidated = _sort_new_consolidate_season_wrappers(
         all_series_list, dry_run=dry_run, yes=bool(safe_getattr(args, 'yes', False)))
     if _consolidated:
+        if not dry_run:
+            for _k, _d, _lib in all_series_list:
+                if _k in _consolidated and _lib:
+                    affected_libs.add(_lib)
         all_series_list = [(k, d, lib) for k, d, lib in all_series_list
                            if k not in _consolidated]
 
@@ -41931,6 +41960,7 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
                     if not success:
                         print(f"  ✗ FAILED: {src}")
                         continue
+                    affected_libs.add(library_name)
                     print(f"  ✓ un-sorted: {os.path.basename(src)} → root")
                     # Empty source season dir → rmdir it (non-recursive).
                     if parent != series_dir_server:
@@ -42476,6 +42506,8 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
 
         total_sorted += sorted_count
         total_failed += failed_count
+        if not dry_run and sorted_count > 0:
+            affected_libs.add(library_name)
         series_summaries.append((series_key, library_name, series_title, len(unsorted), sorted_count, failed_count, skipped_count))
 
     # --- Movie libraries: create directories for bare video files ---
@@ -42623,6 +42655,8 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
 
         if lib_bare_count > 0:
             movie_summaries.append((lib_name, lib_bare_count, lib_sorted_count, lib_failed_count))
+        if not dry_run and lib_sorted_count > 0:
+            affected_libs.add(lib_name)
 
     # Skip summary when targeting a specific series (not a library)
     single_target = target and target not in PLEX_Library.OBJ_DICT
@@ -42654,6 +42688,9 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
             print(f"\nDone: {'; '.join(parts)}")
     else:
         print("\nNothing to sort.")
+
+    if not dry_run and affected_libs:
+        _trigger_plex_scan_and_refresh_cache(affected_libs)
 
     # v2.24: after series sorting, also run MOVIE routing if the user has
     # SORT_NEW_MOVIE_ROUTES configured (default empty → no-op).
