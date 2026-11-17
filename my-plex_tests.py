@@ -7118,6 +7118,7 @@ class TestSortNewDatePrecedence(unittest.TestCase):
             media.OBJ_BY_ID, media.OBJ_BY_LIBRARY, media.OBJ_BY_SERIES_EPISODES,
             lib.OBJ_DICT, lib.OBJ_DICT_TYPE, self.mp.PLEX_DB_REMOTE_HOST,
             self.mp.SORT_NEW_SCAN_LOCATIONS, self.mp._SORT_NEW_LOCATIONS_COMPILED,
+            self.mp.FORCE_TSV, self.mp.OFFLINE,
         )
 
     def tearDown(self):
@@ -7127,17 +7128,42 @@ class TestSortNewDatePrecedence(unittest.TestCase):
             media.OBJ_BY_ID, media.OBJ_BY_LIBRARY, media.OBJ_BY_SERIES_EPISODES,
             lib.OBJ_DICT, lib.OBJ_DICT_TYPE, self.mp.PLEX_DB_REMOTE_HOST,
             self.mp.SORT_NEW_SCAN_LOCATIONS, self.mp._SORT_NEW_LOCATIONS_COMPILED,
+            self.mp.FORCE_TSV, self.mp.OFFLINE,
         ) = self._saved
 
-    def test_dated_files_use_tsv_before_abs_idx_and_special(self):
+    def _setup_sort_new_fixture(
+        self,
+        tsv_eps: list[dict[str, Any]],
+        files: list[str],
+    ) -> None:
         from unittest import mock
         root = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, root, True)
         series_dir = os.path.join(root, 'tagesschau')
         s0x_dir = os.path.join(series_dir, 's0x')
         os.makedirs(s0x_dir)
+        write_episodes_tsv(
+            os.path.join(series_dir, 'episodes.tsv'),
+            {'source': 'fernsehserien.de', 'slug': 'test-show', 'series_id': '23209'},
+            tsv_eps,
+        )
+        for fn in files:
+            open(os.path.join(s0x_dir, fn), 'w').close()
+        media = self.mp.PLEX_Media
+        lib = self.mp.PLEX_Library
+        series_rec: dict[str, Any] = {'type': 'Series', 'type_str': 'Series', 'id': 3295, 'title': 'Tagesschau', 'library': 'lib6', 'file': series_dir}
+        media.OBJ_BY_ID = {'Series:3295': series_rec}
+        media.OBJ_BY_LIBRARY = {'lib6': {'Series': ['Series:3295']}}
+        media.OBJ_BY_SERIES_EPISODES = {'Series:3295': {}}
+        lib.OBJ_DICT = {'lib6': mock.MagicMock(locations=[root])}
+        lib.OBJ_DICT_TYPE = {'lib6': 'Series'}
+        self.mp.PLEX_DB_REMOTE_HOST = ''
+        self.mp.SORT_NEW_SCAN_LOCATIONS = ['.', 's0x']
+        self.mp._SORT_NEW_LOCATIONS_COMPILED = None
 
-        # Create 80 TSV entries so len(all_episodes) >= 25 (making _2_ and _25_ eligible for 1e)
+    def test_dated_files_use_tsv_before_abs_idx_and_special(self):
+        from unittest import mock
+        # Create 58 TSV entries so len(all_episodes) >= 25 (making _2_ and _25_ eligible for 1e)
         tsv_eps: list[dict[str, Any]] = [
             {'season': 0, 'episode': n, 'date': f'2020-01-{n:02d}' if n <= 28 else f'2020-02-{n - 28:02d}', 'title': f'Folge {n}'}
             for n in range(1, 56)
@@ -7147,12 +7173,6 @@ class TestSortNewDatePrecedence(unittest.TestCase):
             {'season': 0, 'episode': 77, 'date': '2026-09-05', 'title': 'Das Spenden-Special (6)'},
             {'season': 0, 'episode': 79, 'date': '2026-09-26', 'title': 'Folge 79'},
         ])
-        write_episodes_tsv(
-            os.path.join(series_dir, 'episodes.tsv'),
-            {'source': 'fernsehserien.de', 'slug': 'test-show', 'series_id': '23209'},
-            tsv_eps,
-        )
-
         files = [
             # Dated + embedded _2_ in Teil_2_2: must resolve via TSV 2026-08-08 -> S00E76, NOT abs-idx=2
             'Show__Teil_2_2___Folge_76_26.08.08_22-15_zdf_60_TVOON_DE.mpg.HQ.mp4',
@@ -7167,24 +7187,13 @@ class TestSortNewDatePrecedence(unittest.TestCase):
             # Non-dated file with embedded index 25: must still match [abs-idx=25]
             'Show_-_25_-_Title.avi',
         ]
-        for fn in files:
-            open(os.path.join(s0x_dir, fn), 'w').close()
-
-        media = self.mp.PLEX_Media
-        lib = self.mp.PLEX_Library
-        series_rec: dict[str, Any] = {'type': 'Series', 'type_str': 'Series', 'id': 3295, 'title': 'Tagesschau', 'library': 'lib6', 'file': series_dir}
-        media.OBJ_BY_ID = {'Series:3295': series_rec}
-        media.OBJ_BY_LIBRARY = {'lib6': {'Series': ['Series:3295']}}
-        media.OBJ_BY_SERIES_EPISODES = {'Series:3295': {}}
-        lib.OBJ_DICT = {'lib6': mock.MagicMock(locations=[root])}
-        lib.OBJ_DICT_TYPE = {'lib6': 'Series'}
-        self.mp.PLEX_DB_REMOTE_HOST = ''
-        self.mp.SORT_NEW_SCAN_LOCATIONS = ['.', 's0x']
-        self.mp._SORT_NEW_LOCATIONS_COMPILED = None
+        self._setup_sort_new_fixture(tsv_eps, files)
 
         buf = io.StringIO()
         args = mock.MagicMock(redo=False, yes=False, force=False)
         with mock.patch.object(self.mp, 'is_episodes_tsv_stale', return_value=False), \
+             mock.patch.object(self.mp, 'scrape_episodes',
+                               return_value=({'source': 'fernsehserien.de', 'slug': 'test-show', 'series_id': '23209'}, tsv_eps)) as scrape_mock, \
              mock.patch.object(self.mp, '_sort_new_consolidate_season_wrappers', return_value=set()), \
              mock.patch.object(self.mp, '_sort_new_movies'), \
              mock.patch.object(self.mp, '_write_resolve_log'), \
@@ -7192,6 +7201,7 @@ class TestSortNewDatePrecedence(unittest.TestCase):
             cmd_sort_new(args, dry_run=True, target='Series:3295')
 
         out = buf.getvalue()
+        self.assertEqual(scrape_mock.call_count, 1)
         self.assertIn('[tsv] 2026-08-08 -> S00E76: Show__Teil_2_2___Folge_76_26.08.08_22-15_zdf_60_TVOON_DE.mpg.HQ.mp4', out)
         self.assertNotIn('[abs-idx=2]', out)
         self.assertIn('[tsv] 2026-09-05 -> S00E77: Show__Das_Spenden-Special_26.09.05_20-15_zdf_164_TVOON_DE.HQ.mp4', out)
@@ -7200,6 +7210,53 @@ class TestSortNewDatePrecedence(unittest.TestCase):
         self.assertNotIn('[absolute]', out)
         self.assertIn('Show_XXL_25.01.01_20-15_ard.avi -> specials/', out)
         self.assertIn('[abs-idx=25] S00E25: Show_-_25_-_Title.avi', out)
+
+    def test_force_tsv_and_auto_refresh_on_missing_dated_file(self):
+        from unittest import mock
+        stale_75 = [{'season': 0, 'episode': 75, 'date': '2026-04-18', 'title': 'Folge 75'}]
+        fresh_78 = stale_75 + [{'season': 0, 'episode': 78, 'date': '2026-09-23', 'title': 'Folge 78'}]
+        meta = {'source': 'fernsehserien.de', 'slug': 'test-show', 'series_id': '23209'}
+        fn_78 = 'Show__Folge_78_26.09.23_20-15_zdf_90_TVOON_DE.HQ.mp4'
+        fn_75 = 'Show__Folge_75_26.04.18_20-15_zdf_90_TVOON_DE.HQ.mp4'
+
+        def _run_sort(tsv_eps, files, *, force_tsv, offline):
+            self._setup_sort_new_fixture(tsv_eps, files)
+            self.mp.FORCE_TSV = force_tsv
+            self.mp.OFFLINE = offline
+            buf = io.StringIO()
+            args = mock.MagicMock(redo=False, yes=False, force=False)
+            with mock.patch.object(self.mp, 'is_episodes_tsv_stale', return_value=False), \
+                 mock.patch.object(self.mp, 'scrape_episodes', return_value=(meta, fresh_78)) as scrape_mock, \
+                 mock.patch.object(self.mp, '_sort_new_consolidate_season_wrappers', return_value=set()), \
+                 mock.patch.object(self.mp, '_sort_new_movies'), \
+                 mock.patch.object(self.mp, '_write_resolve_log'), \
+                 contextlib.redirect_stdout(buf):
+                cmd_sort_new(args, dry_run=True, target='Series:3295')
+            return buf.getvalue(), scrape_mock
+
+        # 1. --force-tsv triggers rescrape even on a fresh TSV where existing dates match
+        out_force, mock_force = _run_sort(stale_75, [fn_75], force_tsv=True, offline=False)
+        self.assertEqual(mock_force.call_count, 1)
+        self.assertTrue(mock_force.call_args.kwargs.get('force'))
+        self.assertIn('[tsv] 2026-04-18 -> S00E75:', out_force)
+
+        # 2. Missing dated file triggers one-shot refresh on cached (<24h) TSV and resolves match
+        out_auto, mock_auto = _run_sort(stale_75, [fn_78], force_tsv=False, offline=False)
+        self.assertEqual(mock_auto.call_count, 1)
+        self.assertTrue(mock_auto.call_args.kwargs.get('force'))
+        self.assertIn('Refreshing episodes.tsv', out_auto)
+        self.assertIn('[tsv] 2026-09-23 -> S00E78:', out_auto)
+
+        # 3. Cached TSV already contains all unsorted dates -> no network scrape
+        out_cached, mock_cached = _run_sort(fresh_78, [fn_78], force_tsv=False, offline=False)
+        self.assertEqual(mock_cached.call_count, 0)
+        self.assertIn('[tsv] 2026-09-23 -> S00E78:', out_cached)
+
+        # 4. --offline skips both --force-tsv and missing-date auto-refresh
+        out_offline, mock_offline = _run_sort(stale_75, [fn_78], force_tsv=True, offline=True)
+        self.assertEqual(mock_offline.call_count, 0)
+        self.assertIn('[skip]', out_offline)
+        self.assertIn('--force-tsv', out_offline)
 
 
 class TestUncataloguedFilepathInfo(unittest.TestCase):

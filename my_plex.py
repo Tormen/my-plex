@@ -606,7 +606,7 @@ _my-plex() {
         '--renumber[Episodes with incorrect S0xE0x in filename]'
         '--plex[With --renumber: show Plex metadata numbering issues]'
         '--fix[With --renumber/--unsorted: apply changes (respects --try)]'
-        '--force-tsv[Re-scrape all episode TSV files (use with --update-cache)]'
+        '--force-tsv[Re-scrape episode TSV files (with --update-cache or --sort-new)]'
         '--playlist[Select/manage a playlist]:name:'
         '--sort-new[Sort unsorted recordings (shortcut for --unsorted --fix)]'
         '--plex2disk[Sync Plex metadata to disk markers]'
@@ -4037,7 +4037,7 @@ OPTIONS:
 
 COMMANDS:
   -U, --update-cache       Update / rebuild cache from Plex server
-      --force-tsv          Re-scrape all episode TSV files (use with --update-cache)
+      --force-tsv          Re-scrape episode TSV files (use with --update-cache or --sort-new)
       --verify-cache       Verify cache consistency with server
   --list-libraries         List all Plex libraries with stats
   --list [SCOPE]           List / filter media  (SCOPE: bitrate<2, type:movie, …)
@@ -4352,7 +4352,7 @@ def main_print_help(args: argparse.Namespace, remaining_args: list[str], main_pa
             print("  --plex                   With --renumber: show Plex metadata issues")
             print("  --fix [--try]            With --renumber or --unsorted: apply changes")
             print("  --force                  With --reencode --mark: also remove old labels")
-            print("  --force-tsv              With --update-cache: re-scrape episode data")
+            print("  --force-tsv              With --update-cache or --sort-new: re-scrape episode data")
             print("  --force-plex           With --update-cache: rebuild cache from zero")
             print("  --force-metadata         With --update-cache: re-probe all file metadata")
             print()
@@ -6459,8 +6459,10 @@ def main_print_help(args: argparse.Namespace, remaining_args: list[str], main_pa
             print("  --dry-run / -n   Show what would be done without moving files.")
             print()
             print("  episodes.tsv is auto-updated from the episode data source (see")
-            print("  EPISODE-DATA-SOURCE column in --list-libraries) if older than 24 hours.")
-            print("  If the source changes (e.g. due to config update), the TSV is re-scraped.")
+            print("  EPISODE-DATA-SOURCE column in --list-libraries) if older than 24 hours,")
+            print("  once per series when an unsorted dated file is missing from a cached TSV,")
+            print("  or when --force-tsv is passed.  If the source changes (e.g. due to")
+            print("  config update), the TSV is re-scraped.")
             print()
             print("EXAMPLES:")
             print()
@@ -7739,17 +7741,18 @@ def main_print_help(args: argparse.Namespace, remaining_args: list[str], main_pa
             print("=" * 76)
             print()
             print("Usage: my-plex --update-cache --force-tsv")
+            print("       my-plex [SCOPE] --sort-new --force-tsv")
             print()
-            print("Re-scrapes ALL episode data (TSV) files from their sources")
-            print("(TVDB, TMDB, fernsehserien.de) during --update-cache.")
+            print("Re-scrapes episode data (TSV) files from their sources")
+            print("(TVDB, TMDB, fernsehserien.de) during --update-cache or --sort-new.")
             print()
-            print("Normally, episode data is only scraped once and cached on disk.")
+            print("Normally, episode data is cached on disk and reused while fresh.")
             print("Use --force-tsv when:")
             print("  - A source has updated its data (new episodes, corrections)")
             print("  - TSV files are corrupt or outdated")
             print("  - You changed MISSING_EPISODES_SOURCE in config")
             print()
-            print("Must be combined with --update-cache.")
+            print("Combine with --update-cache or --sort-new.")
             print()
             print("=" * 76)
             sys.exit(0)
@@ -41771,6 +41774,72 @@ def _sort_new_consolidate_season_wrappers(all_series_list: Sequence[tuple[str, M
     return consolidated_keys
 
 
+def _build_sort_new_date_lookup(
+    episodes: list[EpisodeTsvRow] | None,
+) -> dict[str, tuple[int, int, str]]:
+    """Map YYYY-MM-DD air date -> (season, episode, title) from episodes.tsv rows."""
+    date_lookup: dict[str, tuple[int, int, str]] = {}
+    if episodes:
+        for ep in episodes:
+            date_lookup[ep['date']] = (ep['season'], ep['episode'], ep.get('title', ''))
+    return date_lookup
+
+
+def _has_unmatched_dated_unsorted(
+    unsorted: list[tuple[str, str, str | None, str]],
+    date_lookup: dict[str, tuple[int, int, str]],
+) -> bool:
+    """Return True if any unsorted file has an air date absent from date_lookup."""
+    for fn, _fp, _tm, _loc in unsorted:
+        file_date = extract_episode_date(fn)
+        if file_date is None:
+            continue
+        iso_date = file_date.strftime('%Y-%m-%d')
+        prev_iso = (file_date - timedelta(days=1)).strftime('%Y-%m-%d')
+        if iso_date not in date_lookup and prev_iso not in date_lookup:
+            return True
+    return False
+
+
+def _load_sort_new_episodes(
+    series_title: str,
+    series_dir: str,
+    tsv_path: str,
+    source: str,
+    external_ids: dict[str, str],
+    year: int | None,
+    unsorted: list[tuple[str, str, str | None, str]],
+) -> tuple[dict[str, str] | None, list[EpisodeTsvRow] | None]:
+    """Load episodes.tsv for --sort-new, honouring --force-tsv, 24h staleness,
+    and one-shot auto-refresh when unsorted dated files are missing from a cached TSV."""
+    metadata, all_episodes = read_episodes_tsv(tsv_path)
+    if OFFLINE:
+        return metadata, all_episodes
+
+    if metadata is not None and (FORCE_TSV or is_episodes_tsv_stale(tsv_path)):
+        return scrape_episodes(
+            series_title, series_dir, source=source, force=FORCE_TSV,
+            external_ids=external_ids, year=year,
+        )
+
+    if not all_episodes:
+        print("    No episodes.tsv — attempting to scrape...")
+        return scrape_episodes(
+            series_title, series_dir, source=source, force=True,
+            external_ids=external_ids, year=year,
+        )
+
+    date_lookup = _build_sort_new_date_lookup(all_episodes)
+    if _has_unmatched_dated_unsorted(unsorted, date_lookup):
+        print("    Refreshing episodes.tsv (unsorted dated file(s) not in cached TSV)...")
+        return scrape_episodes(
+            series_title, series_dir, source=source, force=True,
+            external_ids=external_ids, year=year,
+        )
+
+    return metadata, all_episodes
+
+
 def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None) -> None:
     """Sort unsorted recordings into season directories for all series.
 
@@ -41939,16 +42008,10 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
 
         # Load / update episodes.tsv (reads via local path or SSH)
         tsv_path = get_episodes_tsv_path(series_dir_local if use_local else series_dir_server)
-        metadata, all_episodes = None, None
-
-        metadata, all_episodes = read_episodes_tsv(tsv_path)
-        if metadata is not None and is_episodes_tsv_stale(tsv_path):
-            metadata, all_episodes = scrape_episodes(series_title, series_dir, source=source, external_ids=external_ids)
-
-        if not all_episodes:
-            # Try scraping
-            print(f"    No episodes.tsv — attempting to scrape...")
-            metadata, all_episodes = scrape_episodes(series_title, series_dir, source=source, force=True, external_ids=external_ids)
+        metadata, all_episodes = _load_sort_new_episodes(
+            series_title, series_dir, tsv_path, source, external_ids,
+            series_dict.get('year'), unsorted,
+        )
 
         # Print episode data summary
         if all_episodes:
@@ -41956,11 +42019,7 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
             max_s = max((ep['season'] for ep in all_episodes), default=0)
             print(f"  {ep_source.upper()}: {len(all_episodes)} episodes in {max_s} season(s)")
 
-        # Build date lookup: date_str -> (season, episode, title)
-        date_lookup: dict[str, tuple[int, int, str]] = {}
-        if all_episodes:
-            for ep in all_episodes:
-                date_lookup[ep['date']] = (ep['season'], ep['episode'], ep.get('title', ''))
+        date_lookup = _build_sort_new_date_lookup(all_episodes)
 
         # Get specials pattern from metadata
         specials_pattern = metadata.get('specials_pattern') if metadata else None
@@ -42229,7 +42288,7 @@ def cmd_sort_new(args: object, dry_run: bool = False, target: str | None = None)
                 else:
                     _hint += " (no scraped episode list)"
                 print(f"    [skip] {fn}")
-                print(f"           {_hint} — fix series match (--mismatched) or refresh TSV, then re-run with --redo")
+                print(f"           {_hint} — fix series match (--mismatched) or refresh TSV (--force-tsv), then re-run with --redo")
                 skipped_count += 1
                 continue
 
