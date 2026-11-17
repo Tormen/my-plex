@@ -6088,10 +6088,9 @@ def main_print_help(args: argparse.Namespace, remaining_args: list[str], main_pa
             print("  half-written TMP is trashed; a DONE file is trashed while its original")
             print("  is there (encoded again), its swap finished when the original is gone.")
             print(f"  No new file starts while a `Plex Transcoder` runs: it looks again every")
-            print(f"  {REENCODE_PLEX_WAIT_S // 60} minutes.  When the window ends with work left, it mails --")
-            print('  MAIL_CMD warn "my-plex: N files still [reencode], ~Nh left" -- with the')
-            print("  hours and evenings left at the speed measured here")
-            print("  (~/.my-plex/reencode-speed.json); a failed file is mailed at the end.")
+            print(f"  {REENCODE_PLEX_WAIT_S // 60} minutes.  When the window ends with work left, it logs what")
+            print("  remains (using speeds measured in ~/.my-plex/reencode-speed.json,")
+            print("  no mail); a failed file is mailed at the end.")
             print("  --try: the plan, nothing encoded.  --yes: no question.")
             print()
             print("THE NIGHTLY JOB: `my-plex --install`, as root on the Plex server, writes")
@@ -39463,7 +39462,7 @@ class _ReencodeRun:
         self.records: list[dict[str, Any]] = []
         self.before = self.after = 0
         self.libraries: set[str] = set()
-        self.mailed_window = False
+        self.reported_window = False
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
         logs = os.path.join(_data_home(), '.my-plex', 'logs')
         os.makedirs(logs, exist_ok=True)
@@ -39484,17 +39483,16 @@ class _ReencodeRun:
             return "no speed measured yet"
         return f"about {_hours(media_s / speed)} of work at {speed:.1f}x"
 
-    def mail_window_end(self, current: ReencodeItem | None) -> None:
-        """At the window's end with work left: one mail, once, now -- not at
-        the shutdown, when nothing may send."""
-        if self.mailed_window or not self.scheduled:
+    def report_window_end(self, current: ReencodeItem | None) -> None:
+        """At the window's end with work left: log once what remains; never send
+        a progress mail (only failures warn)."""
+        if self.reported_window or not self.scheduled:
             return
-        self.mailed_window = True
+        self.reported_window = True
         n, media_s = self.work_left(current)
         if not n:
             return
         speed = reencode_speed()
-        left = f"~{_hours(media_s / speed)} left" if speed else "speed not measured yet"
         evenings = ""
         if speed and self.window_end is not None:
             span = parse_window_duration(REENCODE_DURATION).total_seconds()
@@ -39502,13 +39500,6 @@ class _ReencodeRun:
         so_far = (f"{len(self.done)} encoded so far ({format_filesize(self.before)} -> "
                   f"{format_filesize(self.after)})") if self.done else "nothing encoded"
         print(f">>> window ended: {so_far}, {n} left: {self.estimate(media_s)}{evenings}")
-        subject = f"my-plex: {n} files still {_label_marker()}, {left}"
-        body = (f"The reencode window ({REENCODE_SCHEDULE!r} for {REENCODE_DURATION}) ended with work left.\n\n"
-                f"{so_far}; {n} file(s) left: {self.estimate(media_s)}{evenings}.\n"
-                + (f"One of them is encoding now and runs on to its end.\n" if current else "")
-                + "\n" + "\n".join(f"  {i.label()}" for i in ([current] if current else []) + self.todo[:50])
-                + ("\n  ..." if len(self.todo) > 50 else "") + "\n")
-        self.mail(subject, body)
 
     def mail(self, subject: str, body: str) -> None:
         rc, shown, out = send_mail(subject, body)
@@ -39682,7 +39673,7 @@ class _ReencodeRun:
         """Wait for the encode, mailing at the window's end meanwhile."""
         while child.poll() is None:
             if self.window_over():
-                self.mail_window_end(current)
+                self.report_window_end(current)
             time.sleep(REENCODE_POLL_S)
         return child.returncode
 
@@ -39785,7 +39776,7 @@ class _ReencodeRun:
             if _REENCODE_STOP:
                 return
             if self.window_over():
-                self.mail_window_end(None)
+                self.report_window_end(None)
                 return
             pid = _plex_transcoding(self.host)
             if pid:
@@ -39808,10 +39799,10 @@ def cmd_reencode_resolve(targets: list[str], dry_run: bool, yes: bool, now: bool
     them, labelled or not -- and swap each in once it passes the check.
 
     A run with neither --now nor a path is the scheduled one: it starts new
-    files only inside the window REENCODE_SCHEDULE / REENCODE_DURATION name
-    and mails what is left at the window's end.  A started file always runs
-    on to its end; SIGTERM (a shutdown) stops it, trashes its temp file and
-    keeps the original, labelled, for a later run."""
+    files only inside the window REENCODE_SCHEDULE / REENCODE_DURATION name,
+    logs what remains if the window ends, and mails only when files fail.  A
+    started file always runs on to its end; SIGTERM (a shutdown) stops it,
+    trashes its temp file and keeps the original, labelled, for a later run."""
     global _REENCODE_STOP
     host = _reencode_host()
     paths = [t for t in targets if t.startswith(('/', '~'))]

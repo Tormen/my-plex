@@ -220,12 +220,11 @@ its label, and is encoded again from the start. SIGTERM -- a restart, a
 `launchctl` stop -- stops the encode: the temp file is trashed, the original
 kept with its label, a record logged (`stopped: SIGTERM`), exit 143. No new file starts while a `Plex Transcoder`
 runs (it looks again every 5 minutes). Each finished file records its speed
-in `~/.my-plex/reencode-speed.json`, which `--try` and the mail use: when the
-window ends with work left, that moment -- not the shutdown -- it mails
-`my-plex: 40 files still [reencode], ~17h left` through `MAIL_CMD`
-(`my-mail warn "<SUBJECT>"`, the body on stdin), and a run's failed files at
-its end. `--test-mail` sends one mail through that very call and fails --
-exit 75 -- when it could only be queued. `--try` prints the plan.
+in `~/.my-plex/reencode-speed.json`, which `--try` and the window-end log
+line use; only failed files send a mail at the end through `MAIL_CMD`
+(`my-mail warn "<SUBJECT>"`, the body on stdin). `--test-mail` sends one mail
+through that very call and fails -- exit 75 -- when it could only be queued.
+`--try` prints the plan.
 
 ```
 $ my-plex --reencode --resolve --yes

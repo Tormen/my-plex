@@ -19690,22 +19690,32 @@ class TestReencodeResolve(unittest.TestCase):
         self.assertIn('outside the window', out)
         self.assertEqual(self.lines('hb_calls'), [])
 
-    def test_the_window_end_mails_what_is_left_but_only_from_the_schedule(self):
+    def test_the_window_end_logs_what_is_left_without_mailing(self):
         a = self.put('A (2001)/a [reencode].mkv')
         b = self.put('B (2002)/b [reencode].mkv')
         self.cache('Movie:14', a)
         self.cache('Movie:15', b)
         items = self.m.reencode_labelled_plan(None)
-        quiet = contextlib.redirect_stdout(io.StringIO())
-        with quiet:
+        with contextlib.redirect_stdout(io.StringIO()):
             self.m._ReencodeRun(list(items), None, False, _dt.datetime.now()).run()
         self.assertEqual(self.lines('mail_calls'), [], "a run by hand mailed")
-        with contextlib.redirect_stdout(io.StringIO()):
+        sched_buf = io.StringIO()
+        with contextlib.redirect_stdout(sched_buf):
             self.m._ReencodeRun(list(items), None, True, _dt.datetime.now()).run()
         self.assertEqual(self.lines('hb_calls'), [], "a file started after the window's end")
+        self.assertIn('>>> window ended: nothing encoded, 2 left:', sched_buf.getvalue())
+        self.assertEqual(self.lines('mail_calls'), [], "progress at window end must not mail")
+
+    def test_failed_reencode_in_scheduled_run_still_mails(self):
+        a = self.put('Fail (2001)/fail [reencode].mkv')
+        self.cache('Movie:17', a)
+        self.mode('fail')
+        self.m.REENCODE_SCHEDULE, self.m.REENCODE_DURATION = '* * * * *', '1h'
+        code, out, errs = self.resolve(now=False)
+        self.assertEqual(code, 1, out + errs)
         calls = self.lines('mail_calls')
         self.assertEqual(len(calls), 1, calls)
-        self.assertTrue(calls[0].startswith('warn my-plex: 2 files still [reencode], '), calls)
+        self.assertEqual(calls[0], 'warn my-plex: 1 reencode(s) FAILED')
 
     def test_cron_fields_windows_and_launchd_entries(self):
         m = self.m
