@@ -7219,7 +7219,7 @@ class TestSortNewDatePrecedence(unittest.TestCase):
         fn_78 = 'Show__Folge_78_26.09.23_20-15_zdf_90_TVOON_DE.HQ.mp4'
         fn_75 = 'Show__Folge_75_26.04.18_20-15_zdf_90_TVOON_DE.HQ.mp4'
 
-        def _run_sort(tsv_eps, files, *, force_tsv, offline):
+        def _run_sort(tsv_eps: list[dict[str, Any]], files: list[str], *, force_tsv: bool, offline: bool) -> tuple[str, Any]:
             self._setup_sort_new_fixture(tsv_eps, files)
             self.mp.FORCE_TSV = force_tsv
             self.mp.OFFLINE = offline
@@ -7296,7 +7296,7 @@ class TestSortNewDatePrecedence(unittest.TestCase):
         fn_78 = 'Show__Folge_78_26.09.23_20-15_zdf_90_TVOON_DE.HQ.mp4'
         fn_skip = 'Show__Folge_99_26.11.01_20-15_zdf_90_TVOON_DE.HQ.mp4'
 
-        def _run_implicit(files, *, dry_run, offline):
+        def _run_implicit(files: list[str], *, dry_run: bool, offline: bool) -> tuple[str, Any, Any, Any, Any, Any]:
             self._setup_sort_new_fixture(fresh_78, files)
             self.mp.FORCE_TSV = False
             self.mp.OFFLINE = offline

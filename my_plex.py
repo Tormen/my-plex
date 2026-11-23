@@ -44990,7 +44990,7 @@ def _report_uncatalogued_filepath(identifier: str) -> None:
                         matched_root = rp_norm
 
     parent_key: str | None = None
-    parent_obj: MediaRecord | None = None
+    parent_obj: MediaRecord | CollectionRecord | None = None
     best_len = -1
     for key, obj in PLEX_Media.OBJ_BY_ID.items():
         if obj['type'] not in ('Series', 'Season', 'Movie'):
