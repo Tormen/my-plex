@@ -19525,7 +19525,7 @@ class TestReencodeResolve(unittest.TestCase):
         self.cache('Episode:12', e2)
         run = self.m._ReencodeRun([self.m._reencode_item('Episode:11', e1)], None, False, None)
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errs:
-            run.run()
+            run.encode_plan()
         season = os.path.join(self.media, 'Serie', 'Season 01')
         self.assertEqual(sorted(os.listdir(season)), ['s01e01.mkv', 's01e02 [reencode].mkv'], errs.getvalue())
         self.m.refresh_ondisk_labels_from_cache()
@@ -19697,11 +19697,11 @@ class TestReencodeResolve(unittest.TestCase):
         self.cache('Movie:15', b)
         items = self.m.reencode_labelled_plan(None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.m._ReencodeRun(list(items), None, False, _dt.datetime.now()).run()
+            self.m._ReencodeRun(list(items), None, False, _dt.datetime.now()).encode_plan()
         self.assertEqual(self.lines('mail_calls'), [], "a run by hand mailed")
         sched_buf = io.StringIO()
         with contextlib.redirect_stdout(sched_buf):
-            self.m._ReencodeRun(list(items), None, True, _dt.datetime.now()).run()
+            self.m._ReencodeRun(list(items), None, True, _dt.datetime.now()).encode_plan()
         self.assertEqual(self.lines('hb_calls'), [], "a file started after the window's end")
         self.assertIn('>>> window ended: nothing encoded, 2 left:', sched_buf.getvalue())
         self.assertEqual(self.lines('mail_calls'), [], "progress at window end must not mail")

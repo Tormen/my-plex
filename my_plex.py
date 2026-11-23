@@ -39769,7 +39769,7 @@ class _ReencodeRun:
         self.complete(item, src, done, final, checked[1], rec, original[0], took)
         return True
 
-    def run(self) -> None:
+    def encode_plan(self) -> None:
         """Encode the plan in order: a new file starts only inside the
         window and while Plex transcodes nothing."""
         while self.todo:
@@ -39850,7 +39850,7 @@ def cmd_reencode_resolve(targets: list[str], dry_run: bool, yes: bool, now: bool
     _REENCODE_STOP = 0
     previous = {s: signal.signal(s, _reencode_signal) for s in (signal.SIGTERM, signal.SIGINT)}
     try:
-        run.run()
+        run.encode_plan()
     finally:
         for s, h in previous.items():
             signal.signal(s, h)
