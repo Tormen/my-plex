@@ -827,7 +827,11 @@ count; a title no test has is said in a line and fails the run, and an empty
 FILE gives `1..0`, exit 0. The tests that read the source only -- the run
 list's guard (`TestSuiteRunList`), the err() codes (`TestErrCodes`) and
 pyright (`TestTypeCheck`, about 20 s) -- are titled `the suite: Class.method`,
-so every gated run includes them.
+so every gated run includes them. `my-plex.tests.links`, beside the launcher,
+ties a test to a definition it does not name -- the launcher, and the
+`--run-tests` dispatch the tests reach only by running my-plex. Committing it
+put this folder under the gate: a commit of it needs a passing `my-rollout
+gate` of its bytes first.
 
 The suite lives in `my-plex_tests.py` and is loaded only by `--run-tests` /
 `--unittest` -- never at import time, which is what once killed every command

@@ -1,0 +1,43 @@
+# my-plex.tests.links -- tests linked to a definition they do not name (my-rollout's README,
+# "A tool adopts the commit gate"): <definition> TAB <test title> TAB <the case>.
+# my-rollout's gate runs a test whose function names a touched definition; these
+# lines add the tests that reach one only by running my-plex as a program.
+launcher	TestLauncherAndModules.test_a_boot_module_without_the_tool_beside_it_says_so	runs the tool through its launcher
+launcher	TestLauncherAndModules.test_a_launcher_deployed_without_its_modules_says_so	runs the tool through its launcher
+launcher	TestLauncherAndModules.test_a_python3_too_old_for_the_tool_is_named_on_a_print_only_run	runs the tool through its launcher
+launcher	TestLauncherAndModules.test_ctrl_c_while_the_modules_load_is_one_line_and_130	runs the tool through its launcher
+launcher	TestLauncherAndModules.test_the_tool_module_started_directly_refuses	runs the tool through its launcher
+launcher	TestRunViaSymlink.test_runs_through_a_symlink_in_another_directory	runs the tool through its launcher
+launcher	TestDeployedCopy.test_fixture_reproduces_a_deployed_copy	runs the tool through its launcher
+launcher	TestDeployedCopy.test_help_runs_without_the_test_suite	runs the tool through its launcher
+launcher	TestDeployedCopy.test_test_commands_report_the_missing_suite_in_one_line	runs the tool through its launcher
+main	TestRunTestsTAP.test_list_gives_each_test_once_with_its_function_and_runs_nothing	main() takes --list / --titles FILE off argv
+main	TestRunTestsTAP.test_titles_runs_exactly_the_one_test_named	main() takes --list / --titles FILE off argv
+main	TestRunTestsTAP.test_titles_runs_its_tests_in_the_process_any_run_tests_sets_up	main() takes --list / --titles FILE off argv
+main	TestRunTestsTAP.test_titles_says_a_title_no_test_has_and_fails	main() takes --list / --titles FILE off argv
+main	TestRunTestsTAP.test_titles_with_an_empty_file_runs_nothing_and_passes	main() takes --list / --titles FILE off argv
+main	TestRunTestsTAP.test_titles_takes_one_file_it_can_read	main() takes --list / --titles FILE off argv
+take_run_tests_gate_call	TestRunTestsTAP.test_list_gives_each_test_once_with_its_function_and_runs_nothing	--list / --titles FILE, reached by running my-plex
+take_run_tests_gate_call	TestRunTestsTAP.test_titles_runs_exactly_the_one_test_named	--list / --titles FILE, reached by running my-plex
+take_run_tests_gate_call	TestRunTestsTAP.test_titles_runs_its_tests_in_the_process_any_run_tests_sets_up	--list / --titles FILE, reached by running my-plex
+take_run_tests_gate_call	TestRunTestsTAP.test_titles_says_a_title_no_test_has_and_fails	--list / --titles FILE, reached by running my-plex
+take_run_tests_gate_call	TestRunTestsTAP.test_titles_with_an_empty_file_runs_nothing_and_passes	--list / --titles FILE, reached by running my-plex
+take_run_tests_gate_call	TestRunTestsTAP.test_titles_takes_one_file_it_can_read	--list / --titles FILE, reached by running my-plex
+execute_global_commands	TestRunTestsTAP.test_list_gives_each_test_once_with_its_function_and_runs_nothing	runs --list / --titles where --run-tests runs
+execute_global_commands	TestRunTestsTAP.test_titles_runs_exactly_the_one_test_named	runs --list / --titles where --run-tests runs
+execute_global_commands	TestRunTestsTAP.test_titles_runs_its_tests_in_the_process_any_run_tests_sets_up	runs --list / --titles where --run-tests runs
+execute_global_commands	TestRunTestsTAP.test_titles_says_a_title_no_test_has_and_fails	runs --list / --titles where --run-tests runs
+execute_global_commands	TestRunTestsTAP.test_titles_with_an_empty_file_runs_nothing_and_passes	runs --list / --titles where --run-tests runs
+execute_global_commands	TestRunTestsTAP.test_titles_takes_one_file_it_can_read	runs --list / --titles where --run-tests runs
+print_run_list	TestRunTestsTAP.test_list_gives_each_test_once_with_its_function_and_runs_nothing	--list prints it
+run_tests_titles	TestRunTestsTAP.test_titles_runs_exactly_the_one_test_named	--titles runs it
+run_tests_titles	TestRunTestsTAP.test_titles_runs_its_tests_in_the_process_any_run_tests_sets_up	--titles runs it
+run_tests_titles	TestRunTestsTAP.test_titles_says_a_title_no_test_has_and_fails	--titles runs it
+run_tests_titles	TestRunTestsTAP.test_titles_with_an_empty_file_runs_nothing_and_passes	--titles runs it
+run_tests_titles	TestRunTestsTAP.test_titles_takes_one_file_it_can_read	--titles runs it
+_run_tap	TestRunTestsTAP.test_titles_runs_exactly_the_one_test_named	every TAP run, --titles included
+_run_tap	TestRunTestsTAP.test_titles_runs_its_tests_in_the_process_any_run_tests_sets_up	every TAP run, --titles included
+_run_tap	TestRunTestsTAP.test_titles_says_a_title_no_test_has_and_fails	every TAP run, --titles included
+_run_tap	TestRunTestsTAP.test_titles_with_an_empty_file_runs_nothing_and_passes	every TAP run, --titles included
+_run_tap	TestRunTestsTAP.test_a_passing_scope_exits_zero	every TAP run, --titles included
+_report_uncatalogued_filepath	TestUncataloguedFilepathInfo.test_bare_filepath_known_and_uncatalogued	runs my-plex <PATH> and --info <PATH>, which report an uncatalogued path
