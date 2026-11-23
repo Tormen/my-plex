@@ -14078,7 +14078,7 @@ class TestRunTestsTAP(unittest.TestCase):
     """--run-tests reports TAP-style, because `my-rollout go` reads it: the
     plan `1..N` first, then one `ok K - title` per test as it ends."""
 
-    LINE = re.compile(r'^(ok|not ok) (\d+) - (\S+)', re.M)
+    LINE = re.compile(r'^(ok|not ok) (\d+) - (.+?)(?: # .*)?$', re.M)
 
     @classmethod
     def setUpClass(cls):
@@ -14147,7 +14147,7 @@ class TestRunTestsTAP(unittest.TestCase):
         titles = [m[2] for m in self.LINE.findall(self.out)]
         self.assertTrue(titles, "no TAP line at all")
         for t in titles:
-            self.assertRegex(t, r'^Test\w+\.test_\w+$', f"unreadable title {t!r}")
+            self.assertRegex(t, rf'^({STATIC_TITLE})?Test\w+\.test_\w+$', f"unreadable title {t!r}")
 
     def test_a_passing_scope_exits_zero(self):
         self.assertEqual(self.rc, 0, self.out[-800:])
@@ -14220,6 +14220,80 @@ class TestRunTestsTAP(unittest.TestCase):
         self.assertNotIn('no verdict', line,
                          "the verdict must come from the subTest, not from its absence")
 
+    def _titles_run(self, *titles: str) -> tuple[subprocess.CompletedProcess[str], str]:
+        """`--run-tests --titles FILE`, FILE holding TITLES one per line."""
+        d = tempfile.mkdtemp(prefix='my-plex-titles-')
+        try:
+            path = os.path.join(d, 'titles')
+            with open(path, 'w') as fh:
+                fh.write(''.join(f"{t}\n" for t in titles))
+            r = subprocess.run([sys.executable, '-B', MAIN_SCRIPT, '--run-tests', '--titles', path],
+                               capture_output=True, text=True, timeout=300)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        return r, r.stdout + r.stderr
+
+    def test_list_gives_each_test_once_with_its_function_and_runs_nothing(self):
+        """my-rollout's commit gate reads `--run-tests --list`: one `<title>
+        TAB <its function>` per test.  Before it existed the call was the bare
+        --run-tests beside a --list filter, and ran all 1445 tests."""
+        r = subprocess.run([sys.executable, '-B', MAIN_SCRIPT, '--run-tests', '--list'],
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr[-800:])
+        self.assertNotRegex(r.stdout, r'(?m)^1\.\.\d+$', "--list ran tests")
+        rows = [ln.split('\t') for ln in r.stdout.splitlines() if '\t' in ln]
+        want = run_list()
+        self.assertEqual([title for title, _ in rows], [test_title(t) for t in want])
+        self.assertEqual([fn for _, fn in rows], [t._testMethodName for t in want])
+        self.assertTrue(all(callable(getattr(t, t._testMethodName, None)) for t in want))
+
+    def test_titles_runs_exactly_the_one_test_named(self):
+        """ADVERSARIAL: the title named is part of a longer one
+        (`..._none_input`), so a --titles that matched as --run-tests FILTER
+        does -- by substring -- would run two tests, and one that ran the
+        whole suite 1445.  Exactly that one test runs: plan 1..1."""
+        title = 'TestOndiskLabels.test_parse_ondisk_labels_none'
+        self.assertIn(title + '_input', [test_title(t) for t in run_list()], "the longer title is gone")
+        r, out = self._titles_run(title)
+        self.assertEqual(r.returncode, 0, out[-800:])
+        self.assertRegex(out, r'(?m)^1\.\.1$', out[-800:])
+        self.assertEqual(self.LINE.findall(out), [('ok', '1', title)], out[-800:])
+
+    def test_titles_runs_its_tests_in_the_process_any_run_tests_sets_up(self):
+        """ADVERSARIAL: --titles first ran before main() had registered the
+        object types and read the config.  These two tests read both, so they
+        failed under the gate's --titles and passed under every other
+        --run-tests: what a commit is gated on must be the same run."""
+        titles = ('TestLegacyInlineBlock.test_collection_and_playlist_classes_are_wired',
+                  'TestOndiskLabels.test_reencode_mark_renames_on_the_plex_server')
+        r, out = self._titles_run(*titles)
+        self.assertEqual(self.LINE.findall(out), [('ok', '1', titles[0]), ('ok', '2', titles[1])], out[-1500:])
+        self.assertEqual(r.returncode, 0, out[-800:])
+
+    def test_titles_says_a_title_no_test_has_and_fails(self):
+        title = 'TestOndiskLabels.test_parse_ondisk_labels_none'
+        r, out = self._titles_run(title, 'TestNoSuch.test_nothing', title)
+        self.assertEqual(self.LINE.findall(out), [('ok', '1', title)], "each title runs once")
+        self.assertIn(">>> --titles: 1 title(s) name no test of the run list -- 'TestNoSuch.test_nothing'", out)
+        self.assertEqual(r.returncode, 1, "a gate never passes on a test that did not run")
+
+    def test_titles_with_an_empty_file_runs_nothing_and_passes(self):
+        r, out = self._titles_run()
+        self.assertRegex(out, r'(?m)^1\.\.0$', out[-800:])
+        self.assertEqual(self.LINE.findall(out), [])
+        self.assertEqual(r.returncode, 0, out[-800:])
+
+    def test_titles_takes_one_file_it_can_read(self):
+        for argv in (['--titles'], ['--titles', '/nonexistent/titles'], ['--titles', 'a', 'b'],
+                     ['--list', 'extra']):
+            with self.subTest(argv=argv):
+                r = subprocess.run([sys.executable, '-B', MAIN_SCRIPT, '--run-tests', *argv],
+                                   capture_output=True, text=True, timeout=120)
+                out = r.stdout + r.stderr
+                self.assertNotEqual(r.returncode, 0, out[-800:])
+                self.assertIn('ERROR', out)
+                self.assertNotRegex(out, r'(?m)^1\.\.\d+$', "it ran tests")
+
     def test_bare_run_tests_runs_the_whole_suite(self):
         """Running it here would cost minutes, so this pins the dispatch: bare
         --run-tests must reach the runner, never the scope listing."""
@@ -14227,6 +14301,30 @@ class TestRunTestsTAP(unittest.TestCase):
         self.assertIn("if scope is None or scope.lower() == 'all':\n"
                       "        return _run_unittest_only(_UNITTEST_CLASSES)", src,
                       "bare --run-tests must run every class")
+
+
+class TestSuiteRunList(unittest.TestCase):
+    """The run list -- what the bare --run-tests runs, --list prints and
+    --titles picks from -- is the scopes' classes.  A test class in no scope
+    never runs and no gate sees it; one in two runs twice under one title."""
+
+    def test_every_test_class_is_in_exactly_one_scope(self):
+        loader = unittest.TestLoader()
+        classes = [c for n, c in globals().items()
+                   if isinstance(c, type) and issubclass(c, unittest.TestCase)
+                   and not n.startswith('_') and loader.getTestCaseNames(c)]
+        self.assertGreater(len(classes), 100, "the classes are no longer found")
+        held: list[type[unittest.TestCase]] = [c for scope in _UNITTEST_SCOPES.values() for c in scope]
+        wrong = [f"{c.__name__} ({held.count(c)} scopes)" for c in classes if held.count(c) != 1]
+        self.assertEqual(wrong, [], "each test class belongs in exactly one scope of _UNITTEST_SCOPES")
+
+    def test_every_title_is_unique(self):
+        titles = [test_title(t) for t in run_list()]
+        self.assertEqual(sorted(t for t in set(titles) if titles.count(t) > 1), [])
+
+    def test_the_static_titles_are_the_static_classes(self):
+        static = {t.__class__ for t in run_list() if test_title(t).startswith(STATIC_TITLE)}
+        self.assertEqual(static, set(_STATIC_CLASSES))
 
 
 class TestTrashNotRemove(unittest.TestCase):
@@ -19922,7 +20020,7 @@ _UNITTEST_SCOPES = {
     'errcodes':           [TestErrCodes],
     'root':               [TestNeverRunsAsRoot],
     'typecheck':          [TestTypeCheck],
-    'run-tests':          [TestRunTestsTAP, TestDeployedCopyWithItsSuite],
+    'run-tests':          [TestRunTestsTAP, TestSuiteRunList, TestDeployedCopyWithItsSuite],
     'launcher':           [TestLauncherAndModules],
     'quoting':            [TestRemoteQuoting, TestSqliteHeaderOrder, TestSchemaCheckStopsTheUpdate],
     'reencode':           [TestReencodeResolve, TestReencodeDaemonInstall],
@@ -19955,10 +20053,6 @@ class _TAPResult(unittest.TextTestResult):
         super().__init__(*args, **kwargs)
         self._tap_k = 0
         self._tap_verdict: tuple[str, str] | None = None
-
-    @staticmethod
-    def _tap_title(test: unittest.TestCase) -> str:
-        return f"{test.__class__.__name__}.{test._testMethodName}"
 
     def startTest(self, test: unittest.TestCase) -> None:
         self._tap_k += 1
@@ -20004,7 +20098,7 @@ class _TAPResult(unittest.TextTestResult):
         # No verdict can only mean a hook this class does not know about: say
         # "not ok" rather than pass a test nobody judged.
         status, note = self._tap_verdict or ('not ok', ' # no verdict recorded')
-        print(f"{status} {self._tap_k} - {self._tap_title(test)}{note}", flush=True)
+        print(f"{status} {self._tap_k} - {test_title(test)}{note}", flush=True)
         super().stopTest(test)
 
 
@@ -20040,14 +20134,57 @@ def _tap_suite(classes_or_tests: Iterable[type[unittest.TestCase] | unittest.Tes
     return suite
 
 
-def _tests_matching_title(filter_text: str) -> list[unittest.TestCase]:
-    """Every test whose `Class.method` title contains FILTER_TEXT, any case."""
+# The tests that read the source only -- the run list's guard, the err()
+# codes, pyright over the three files: their titles start STATIC_TITLE, so
+# my-rollout's commit gate runs them in every gated run, whatever the change
+# touched (its README, "A tool adopts the commit gate", step 3).
+STATIC_TITLE = 'the suite: '
+_STATIC_CLASSES: tuple[type[unittest.TestCase], ...] = (TestSuiteRunList, TestErrCodes, TestTypeCheck)
+
+
+def test_title(test: unittest.TestCase) -> str:
+    """A test's title: `Class.method`, after STATIC_TITLE for a static one --
+    what TAP prints, a FILTER matches, --list gives and --titles takes."""
+    cls = test.__class__
+    return f"{STATIC_TITLE if cls in _STATIC_CLASSES else ''}{cls.__name__}.{test._testMethodName}"
+
+
+def run_list() -> list[unittest.TestCase]:
+    """Every test of the suite once, in the order the bare --run-tests runs
+    them: the scopes' classes, each class's tests as unittest loads them."""
     loader = unittest.TestLoader()
+    return [t for cls in _UNITTEST_CLASSES for t in loader.loadTestsFromTestCase(cls)
+            if isinstance(t, unittest.TestCase)]       # a class yields cases, never nested suites
+
+
+def _tests_matching_title(filter_text: str) -> list[unittest.TestCase]:
+    """Every test whose title contains FILTER_TEXT, any case."""
     needle = filter_text.lower()
-    return [t for cls in _UNITTEST_CLASSES
-            for t in loader.loadTestsFromTestCase(cls)
-            if isinstance(t, unittest.TestCase)        # a suite yields cases, never nested suites, here
-            and needle in f"{cls.__name__}.{t._testMethodName}".lower()]
+    return [t for t in run_list() if needle in test_title(t).lower()]
+
+
+def print_run_list() -> None:
+    """`--run-tests --list`: one `<title> TAB <its function>` per test, in
+    the run list's order; nothing runs.  The function is the test's method,
+    by its bare name: my-rollout reads its text to see which definitions the
+    test names (its README, "A tool adopts the commit gate", step 1)."""
+    for t in run_list():
+        print(f"{test_title(t)}\t{t._testMethodName}")
+
+
+def run_tests_titles(titles: list[str]) -> NoReturn:
+    """`--run-tests --titles FILE`: exactly the tests TITLES names (FILE's
+    lines, read by the tool), each once, in TITLES' order -- TAP, the plan
+    their count.  A title the run list does not hold is said in a line and
+    fails the run: a gate never passes on a test that did not run."""
+    import sys
+    by_title = {test_title(t): t for t in run_list()}
+    unknown = [x for x in titles if x not in by_title]
+    passed = _run_tap([by_title[x] for x in dict.fromkeys(titles) if x in by_title])
+    if unknown:
+        print(f">>> --titles: {len(unknown)} title(s) name no test of the run list -- "
+              + "; ".join(repr(x) for x in unknown[:3]) + (" ..." if len(unknown) > 3 else ""), flush=True)
+    sys.exit(0 if passed and not unknown else 1)
 
 
 def describe_test_scopes():
@@ -20068,16 +20205,22 @@ def describe_test_scopes():
     return "\n".join(rows)
 
 
-def _run_unittest_only(unittest_classes: Iterable[type[unittest.TestCase] | unittest.TestCase]) -> NoReturn:
-    """Run the unittest suite and exit: 0 when every test passed, else 1."""
+def _run_tap(unittest_classes: Iterable[type[unittest.TestCase] | unittest.TestCase]) -> bool:
+    """Run these classes and tests, TAP: True when every one passed."""
     import sys
     _use_a_private_temp_dir()
     try:
         result = _TAPRunner().run(_tap_suite(unittest_classes))
     except Exception as e:
         print(f"✗ FAIL: Could not run unittest suite: {e}", file=sys.stderr)
-        sys.exit(1)
-    sys.exit(0 if result.wasSuccessful() else 1)
+        return False
+    return result.wasSuccessful()
+
+
+def _run_unittest_only(unittest_classes: Iterable[type[unittest.TestCase] | unittest.TestCase]) -> NoReturn:
+    """Run the unittest suite and exit: 0 when every test passed, else 1."""
+    import sys
+    sys.exit(0 if _run_tap(unittest_classes) else 1)
 
 def run_regression_tests(scope: str | None = None) -> None:
     """Run the suite: all of it, one scope, or the tests whose title matches.
