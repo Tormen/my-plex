@@ -15531,8 +15531,9 @@ class TestReadmeFlagsExist(unittest.TestCase):
     # Flags the tool recognises WITHOUT argparse, so the AST walk cannot see
     # them.  Kept explicit and short rather than widening the walk to every
     # "--..." string in the file, which would also match the flags my-plex
-    # passes to git and ffmpeg and so stop catching a typo.
-    HANDLED_OUTSIDE_ARGPARSE = {'--unittest'}
+    # passes to git and ffmpeg and so stop catching a typo.  `--titles` is
+    # taken off argv after --run-tests by take_run_tests_gate_call().
+    HANDLED_OUTSIDE_ARGPARSE = {'--unittest', '--titles'}
 
     @staticmethod
     def _readme_flags() -> set[str]:
