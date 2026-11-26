@@ -41,3 +41,9 @@ _run_tap	TestRunTestsTAP.test_titles_says_a_title_no_test_has_and_fails	every TA
 _run_tap	TestRunTestsTAP.test_titles_with_an_empty_file_runs_nothing_and_passes	every TAP run, --titles included
 _run_tap	TestRunTestsTAP.test_a_passing_scope_exits_zero	every TAP run, --titles included
 _report_uncatalogued_filepath	TestUncataloguedFilepathInfo.test_bare_filepath_known_and_uncatalogued	runs my-plex <PATH> and --info <PATH>, which report an uncatalogued path
+_launchd_loaded	TestReencodeDaemonInstall.test_reload_waits_for_bootout_teardown_before_bootstrap	runs my-plex --install as root
+_reload_launchd_job	TestReencodeDaemonInstall.test_reload_waits_for_bootout_teardown_before_bootstrap	runs my-plex --install as root
+_reload_launchd_job	TestReencodeDaemonInstall.test_reload_retries_transient_bootstrap_refusal_and_fails_on_persistent	runs my-plex --install as root
+install_reencode_daemon	TestReencodeDaemonInstall.test_written_on_the_server_loaded_and_stable	runs my-plex --install as root
+install_reencode_daemon	TestReencodeDaemonInstall.test_reload_waits_for_bootout_teardown_before_bootstrap	runs my-plex --install as root
+install_reencode_daemon	TestReencodeDaemonInstall.test_reload_retries_transient_bootstrap_refusal_and_fails_on_persistent	runs my-plex --install as root

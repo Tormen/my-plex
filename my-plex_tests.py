@@ -19888,10 +19888,46 @@ class TestReencodeResolve(unittest.TestCase):
 
 
 _LAUNCHCTL_STUB = r'''#!/bin/dash
-echo "$*" >> "$(dirname "$0")/launchctl_calls"
+D=$(dirname "$0")
+echo "$*" >> "$D/launchctl_calls"
 case $1 in
-  print) [ -f "$(dirname "$0")/loaded" ] ;;
-  bootstrap) touch "$(dirname "$0")/loaded" ;;
+  print)
+    if [ -f "$D/teardown_left" ]; then
+      n=$(cat "$D/teardown_left")
+      if [ "$n" -gt 0 ]; then
+        echo $((n - 1)) > "$D/teardown_left"
+        exit 0
+      fi
+      rm -f "$D/teardown_left" "$D/loaded"
+    fi
+    [ -f "$D/loaded" ]
+    ;;
+  bootout)
+    if [ -f "$D/teardown_polls" ]; then
+      cp "$D/teardown_polls" "$D/teardown_left"
+    else
+      rm -f "$D/loaded"
+    fi
+    ;;
+  bootstrap)
+    if [ -f "$D/teardown_left" ]; then
+      n=$(cat "$D/teardown_left")
+      if [ "$n" -gt 0 ]; then
+        echo "Bootstrap failed: 5: Input/output error" >&2
+        exit 5
+      fi
+    fi
+    if [ -f "$D/bootstrap_fail_once" ]; then
+      rm -f "$D/bootstrap_fail_once"
+      echo "Bootstrap failed: 5: Input/output error" >&2
+      exit 5
+    fi
+    if [ -f "$D/bootstrap_always_fail" ]; then
+      echo "Bootstrap failed: 5: Input/output error" >&2
+      exit 5
+    fi
+    touch "$D/loaded"
+    ;;
 esac
 '''
 
@@ -19900,7 +19936,14 @@ class TestReencodeDaemonInstall(_RootInstallCase):
     """--install as root writes the reencode LaunchDaemon on the Plex server,
     loads it, and leaves it alone when nothing changed."""
 
-    def test_written_on_the_server_loaded_and_stable(self):
+    def _daemon_conf(self, d: str, schedule: str) -> str:
+        return ("RUN_AS_USER = 'nobody'\n"
+                f"PLEX_DB_PATH = {os.path.join(d, 'plex.db')!r}\n"
+                f"REENCODE_SCHEDULE = {schedule!r}\n"
+                "REENCODE_DAEMON_LABEL = 'test.my-plex.reencode'\n"
+                f"EXTERNAL_TOOLS = {{'LOCAL': {{'launchctl': {os.path.join(d, 'launchctl')!r}}}, 'SERVER': {{}}}}\n")
+
+    def _daemon_fixture(self, schedule: str = '30 18 * * 0,6') -> tuple[str, str, str, dict[str, str]]:
         d = tempfile.mkdtemp(prefix='daemon-', dir=self.tmp)
         launchd = os.path.join(d, 'LaunchDaemons')
         os.makedirs(launchd)
@@ -19908,14 +19951,11 @@ class TestReencodeDaemonInstall(_RootInstallCase):
         with open(stub, 'w') as f:
             f.write(_LAUNCHCTL_STUB)
         os.chmod(stub, 0o755)
-        db = os.path.join(d, 'plex.db')
-        open(db, 'w').close()
-        conf = ("RUN_AS_USER = 'nobody'\n"
-                f"PLEX_DB_PATH = {db!r}\n"
-                "REENCODE_SCHEDULE = '30 18 * * 0,6'\n"
-                "REENCODE_DAEMON_LABEL = 'test.my-plex.reencode'\n"
-                f"EXTERNAL_TOOLS = {{'LOCAL': {{'launchctl': {stub!r}}}, 'SERVER': {{}}}}\n")
-        env = {'MY_PLEX_TEST_LAUNCHD_DIR': launchd}
+        open(os.path.join(d, 'plex.db'), 'w').close()
+        return d, launchd, self._daemon_conf(d, schedule), {'MY_PLEX_TEST_LAUNCHD_DIR': launchd}
+
+    def test_written_on_the_server_loaded_and_stable(self):
+        d, launchd, conf, env = self._daemon_fixture()
         first = self.run_root(conf_lines=conf, env=env)
         self.assertEqual(first.r.returncode, 0, first.text())
         plist_path = os.path.join(launchd, 'test.my-plex.reencode.plist')
@@ -19949,6 +19989,38 @@ class TestReencodeDaemonInstall(_RootInstallCase):
         again = open(os.path.join(d, 'launchctl_calls')).read().splitlines()
         self.assertEqual([c for c in again if not c.startswith('print')],
                          [c for c in calls if not c.startswith('print')], "the second run reloaded it")
+
+    def test_reload_waits_for_bootout_teardown_before_bootstrap(self):
+        """launchctl bootout returns while launchd is still stopping a running
+        job: polling print until the old job vanishes avoids Bootstrap rc 5."""
+        d, launchd, conf_old, env = self._daemon_fixture('30 18 * * *')
+        first = self.run_root(conf_lines=conf_old, env=env)
+        self.assertEqual(first.r.returncode, 0, first.text())
+        with open(os.path.join(d, 'teardown_polls'), 'w') as f:
+            f.write('2\n')
+        second = self.run_root(conf_lines=self._daemon_conf(d, '0 1 * * *'), env=env, run_dir=first.d)
+        self.assertEqual(second.r.returncode, 0, second.text())
+        calls = open(os.path.join(d, 'launchctl_calls')).read().splitlines()
+        bootout_idx = calls.index('bootout system/test.my-plex.reencode')
+        plist_path = os.path.join(launchd, 'test.my-plex.reencode.plist')
+        boot_idx = calls.index(f'bootstrap system {plist_path}', bootout_idx)
+        prints_between = [c for c in calls[bootout_idx + 1:boot_idx] if c.startswith('print ')]
+        self.assertGreaterEqual(len(prints_between), 3, calls)
+
+    def test_reload_retries_transient_bootstrap_refusal_and_fails_on_persistent(self):
+        """Even after print drops the job, launchd can refuse bootstrap once;
+        retrying once after a pause recovers, while two refusals still fail."""
+        d, _launchd, conf_old, env = self._daemon_fixture('30 18 * * *')
+        first = self.run_root(conf_lines=conf_old, env=env)
+        self.assertEqual(first.r.returncode, 0, first.text())
+        open(os.path.join(d, 'bootstrap_fail_once'), 'w').close()
+        second = self.run_root(conf_lines=self._daemon_conf(d, '0 1 * * *'), env=env, run_dir=first.d)
+        self.assertEqual(second.r.returncode, 0, second.text())
+        self.assertIn('(at the 2nd try)', second.r.stdout, second.text())
+        open(os.path.join(d, 'bootstrap_always_fail'), 'w').close()
+        third = self.run_root(conf_lines=conf_old, env=env, run_dir=first.d)
+        self.assertEqual(third.r.returncode, 1, third.text())
+        self.assertRegex(third.r.stderr, r'ERROR 00044 \[1\]: .*failed \(2 try/tries\) \[rc 5\]')
 
     def test_not_written_where_the_Plex_database_is_not(self):
         d = tempfile.mkdtemp(prefix='daemon-', dir=self.tmp)

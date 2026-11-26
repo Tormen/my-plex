@@ -8459,6 +8459,15 @@ def install_firewall(config_file: "str | None" = None) -> "tuple[str, str | None
 # never the machine's.
 LAUNCH_DAEMONS_DIR = (os.environ.get('MY_PLEX_TEST_LAUNCHD_DIR', '/nonexistent/LaunchDaemons')
                       if _TEST_RUN else '/Library/LaunchDaemons')
+LAUNCHD_TEARDOWN_TIMEOUT_S = 10.0
+LAUNCHD_POLL_S = 0.2
+LAUNCHD_RETRY_DELAY_S = 1.0
+
+
+def _launchd_loaded(target: str) -> bool:
+    """Return True when TARGET is currently loaded in launchd."""
+    shown = run_tool_locally('launchctl', ['print', target])
+    return shown is not None and shown.returncode == 0
 
 
 def reencode_daemon_plist(user: str, named: "str | None") -> "dict[str, Any]":
@@ -8540,8 +8549,7 @@ def install_reencode_daemon(user: str, named: "str | None" = None) -> None:
     except OSError:
         old = None
     target = f"system/{REENCODE_DAEMON_LABEL}"
-    shown = run_tool_locally('launchctl', ['print', target])
-    loaded = shown is not None and shown.returncode == 0
+    loaded = _launchd_loaded(target)
     starts = len(plist['StartCalendarInterval'])
     if _job_body(old) == _job_body(data) and loaded:
         print(f"    > {path}: unchanged, loaded  ({starts} start time(s))")
@@ -8551,16 +8559,40 @@ def install_reencode_daemon(user: str, named: "str | None" = None) -> None:
         f.write(data)
     os.chmod(tmp, 0o644)
     os.replace(tmp, path)
-    if loaded:
-        run_tool_locally('launchctl', ['bootout', target])
-    r = run_tool_locally('launchctl', ['bootstrap', 'system', path])
-    if r is None or r.returncode != 0:
-        err("00044", f"launchctl bootstrap system {path} failed [rc {r.returncode if r else '?'}]: "
-                     f"{(r.stderr if r else '').strip()[-300:]}")
-    print(f"    > {path}: {'rewritten' if old is not None else 'written'} and loaded  ({starts} start time(s) from"
-          f" REENCODE_SCHEDULE {REENCODE_SCHEDULE!r})")
+    tries = _reload_launchd_job(target, path, loaded)
+    print(f"    > {path}: {'rewritten' if old is not None else 'written'} and loaded"
+          + (" (at the 2nd try)" if tries == 2 else "")
+          + f"  ({starts} start time(s) from REENCODE_SCHEDULE {REENCODE_SCHEDULE!r})")
     print(f"    > runs: {shlex.join(plist['ProgramArguments'])}"
           + ("" if REENCODE_LAUNCHER else f"   (as {user})"))
+
+
+def _reload_launchd_job(target: str, path: str, loaded: bool) -> int:
+    """Stop TARGET when LOADED and wait until launchd drops it, then
+    bootstrap PATH (retried once after a pause if launchd refuses while
+    teardown finishes).  Returns the attempt count (1 or 2); fails with
+    err 00044 if bootstrap still refuses."""
+    gone = True
+    if loaded:
+        run_tool_locally('launchctl', ['bootout', target])
+        deadline = time.monotonic() + LAUNCHD_TEARDOWN_TIMEOUT_S
+        while _launchd_loaded(target):
+            if time.monotonic() >= deadline:
+                gone = False
+                break
+            time.sleep(LAUNCHD_POLL_S)
+    tries = 1
+    r = run_tool_locally('launchctl', ['bootstrap', 'system', path])
+    if r is not None and r.returncode != 0:
+        time.sleep(LAUNCHD_RETRY_DELAY_S)
+        tries = 2
+        r = run_tool_locally('launchctl', ['bootstrap', 'system', path])
+    if r is None or r.returncode != 0:
+        detail = str(r.stderr or '').strip()[-300:] if r else ''
+        still = "" if gone else f" -- the old one was still loaded {int(LAUNCHD_TEARDOWN_TIMEOUT_S)}s after its bootout"
+        err("00044", f"launchctl bootstrap system {path} failed ({tries} try/tries) [rc {r.returncode if r else '?'}]: "
+                     f"{detail}{still}")
+    return tries
 
 
 def install_api_keys(user: str) -> None:
